@@ -424,29 +424,29 @@ fogFactor:
 vTRCValue:
 decalFixMult equ 0x0400
 decalFixOff equ (-(decalFixMult / 2))
-    .dh vertexBuffer // currently 0x02DE; for converting vertex index to address
+    .dh vertexBuffer // around 0x300; for converting vertex index to address
     .dh vtxSize << 7 // 0x1300; it's not 0x2600 because vertex indices are *2
-    .dh 0x1000 // some multiplier in tri write, increment in vertex indices
-    .dh decalFixMult
-    .dh 0x0020 // some edge write thing in tri write; formerly Z scale factor
+    .dh 0x7E00 // vertex index mask for snake
+    .dh decalFixMult // defined above
+    .dh decalFixOff  // negative
     .dh 0xFFF8 // used once in tri write, mask away lower ST bits
-    .dh decalFixOff // negative
     .dh 0x0100 // used several times in tri write
+    .dh 0x1000 // some multiplier in tri write, increment in vertex indices
 .macro set_vcc_11110001
-    vge    $v29, vTRC, vTRC[7]
+    vge    $v29, vTRC, vTRC[0]
 .endmacro
-.if (vertexBuffer < 0x0100 || decalFixMult < 0x100)
+.if (vertexBuffer <= 0x0100 || decalFixMult < vertexBuffer)
     .error "VCC pattern for vTRC corrupted"
 .endif
 vTRC_VB   equ vTRC[0] // Vertex Buffer
 vTRC_VS   equ vTRC[1] // Vertex Size
-vTRC_1000 equ vTRC[2]
+vTRC_7E00 equ vTRC[2]
 vTRC_DM   equ vTRC[3] // Decal Multiplier
-vTRC_0020 equ vTRC[4]
+vTRC_DO   equ vTRC[4] // Decal Offset
 vTRC_FFF8 equ vTRC[5]
-vTRC_DO   equ vTRC[6] // Decal Offset
-vTRC_0100 equ vTRC[7]
-vTRC_0100_addr equ (vTRCValue + 2 * 7)
+vTRC_0100 equ vTRC[6]
+vTRC_1000 equ vTRC[7]
+vTRC_0100_addr equ (vTRCValue + 2 * 6)
 
 fxParams:
 
@@ -1431,7 +1431,7 @@ tPosCatI equ $v15 // 0 X L-M; 1 Y L-M; 2 X M-H; 3 X L-H; 4-7 garbage
     andi    $11, vGeomMid, G_SHADING_SMOOTH >> 8
 .endif
     vmudh   $v29, tPosMmH, tPosLmH[0]
-    // nop
+    li      $19, 0x0020       // Constant for some scaling below
 t1WI equ $v13 // elems 0, 4, 6
     vmadh   $v29, tPosLmH, tPosHmM[0]
     mfc2    $3, tLPos[10]     // tLPos = highest Y value = lowest on screen (x, y, addr)
@@ -1463,11 +1463,12 @@ tXPRcpI equ $v24
     vmrg    tHAtI, $v25, tHAtI        // RGB from original vtx 1, alpha from $1
     vmrg    tMAtI, $v25, tMAtI        // RGB from original vtx 1, alpha from $2
     vmrg    tLAtI, $v25, tLAtI        // RGB from original vtx 1, alpha from $3
+align_with_warning 8, "One instruction of padding before tri_skip_flat_shading"
 tri_skip_flat_shading:
 .endif
-    // 49 cycles
+    // 44 cycles
     vrcp    $v20[2], tPosMmH[1]
-    // no nop if tri_skip_flip_facing was unaligned
+    mtc2    $19, $v25[0] // 0020
     vrcph   $v22[2], tPosMmH[1]
     llv     t1WI[0], VTX_INV_W_VEC($1)
     vrcp    $v20[3], tPosLmH[1]
@@ -1480,9 +1481,9 @@ tri_skip_flat_shading:
     lw      $6, VTX_INV_W_VEC($1) // $6, $7, $8 = 1/W for H, M, L
     vmudl   tLAtI, tLAtI, vTRC_0100 // vertex color 3 >>= 8
     lw      $7, VTX_INV_W_VEC($2)
-    vmudl   $v29, $v20, vTRC_0020
+    vmudl   $v29, $v20, $v25[0] // 0020
     lw      $8, VTX_INV_W_VEC($3)
-    vmadm   $v22, $v22, vTRC_0020
+    vmadm   $v22, $v22, $v25[0] // 0020
     beqz    $20, tri_skip_alpha_compare_cull
      vmadn  $v20, $v31, $v31[2] // 0
     // Alpha compare culling
