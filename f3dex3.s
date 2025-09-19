@@ -324,7 +324,7 @@ v31Value:
     .dh 2      // used as clip ratio (vtx write, clipping) and in clipping
     .dh 4      // used for same Newton-Raphsons, occlusion plane scaling
     .dh 0x4000 // used in tri write, texgen
-    .dh 0x7F00 // used in fog, normals unpacking
+    .dh 0x7F00 // used in fog
     .dh 0x7FFF // used often
 
 /*
@@ -775,7 +775,7 @@ $27   ---------------------------------- inputBufferPos ------------------------
 $28   ----------------------------------- perfCounterA -------------------------------------------
 $29   ----------------------------------- perfCounterB -------------------------------------------
 $30   ----------------------------------- perfCounterC -------------------------------------------
-$ra   return address, sometimes sign bit is flag -------------------------------------------------
+$ra   return address, command handler address, sometimes sign bit is flag ------------------------
 */
 
 // Global scalar regs:
@@ -1216,10 +1216,10 @@ run_next_DL_command:
     beqz    inputBufferPos, displaylist_dma             // load more DL commands if none are left
      andi   $1, $1, SP_STATUS_SIG0                      // check if the task should yield
     sra     $7, cmd_w0, 24                              // extract DL command byte from command word
-    lbu     $11, (cmdMiniTable)($7)                     // Load mini table entry
+    lbu     $ra, (cmdMiniTable)($7)                     // Load mini table entry
     bnez    $1, load_overlay_0_and_enter                // load and execute overlay 0 if yielding; $1 > 0
      lw     cmd_w1_dram, (inputBufferEnd + 4)(inputBufferPos) // load the next DL word into cmd_w1_dram
-    sll     $11, $11, 2                                 // Convert to a number of instructions
+    sll     $ra, $ra, 2                                 // Convert to a number of instructions
 .if CFG_PROFILING_C
     mfc0    $10, DPC_STATUS
     andi    $10, $10, DPC_STATUS_GCLK_ALIVE             // Sample whether GCLK is active now
@@ -1236,11 +1236,11 @@ run_next_DL_command:
     add     perfCounterD, perfCounterD, perfCounterC    // Add initial FIFO stall time to tri time; will subtract final FIFO time later
     sw      $10, startCounterTime
 .endif
-    jr      $11                                         // Jump to handler
+    jr      $ra                                         // Jump to handler
      addi   inputBufferPos, inputBufferPos, 0x0008      // increment the DL index by 2 words
     // $1 must remain zero
     // $7 must retain the command byte for load_mtx and overlay 3 stuff
-    // $11 must contain the handler called for several handlers
+    // $ra must contain the handler called for several handlers
 
 /* This is a crazy optimization, and it was completely accidental!
 When G_RELSEGMENT was implemented, we did not notice the G_MOVEWORD behavior of
@@ -2912,17 +2912,25 @@ mtx_multiply:
     jr      $ra
      sqv    $v5[0], (0x0030)($3)
 
+G_GEOMETRYMODE_handler: // 6
+    lw      $11, geometryModeLabel  // load the geometry mode value
+    and     $11, $11, cmd_w0        // clears the flags in cmd_w0 (set in g*SPClearGeometryMode)
+    or      $11, $11, cmd_w1_dram   // sets the flags in cmd_w1_dram (set in g*SPSetGeometryMode)
+    srl     vGeomMid, $11, 8        // Middle 2 bytes of geom mode to lower 16 bits. Ordered this way to avoid stalls.
+    j       run_next_DL_command     // run the next DL command
+     sw     $11, geometryModeLabel  // Update the geometry mode value
+
 G_VTX_handler: // 19
     lhu     dmemAddr, (vertexTable)(cmd_w0)    // (v0 + n) end address; up to 56 inclusive
     jal     segmented_to_physical              // Convert address in cmd_w1_dram to physical
      lhu    vtxLeft, (inputBufferEnd - 0x07)(inputBufferPos) // vtxLeft = size in bytes = vtx count * 0x10
     sub     dmemAddr, dmemAddr, vtxLeft        // Start addr = end addr - size. Rounded down to DMA word by H/W
-    addi    dmaLen, vtxLeft, -1                // DMA length is always offset by -1
+    li      $ra, vtx_after_dma
     j       dma_read_write
 G_SETOTHERMODE_H_handler: // These handler labels must be 4 bytes apart for the code below to work
-     li     $ra, vtx_after_dma  // Only for above, nop for below
+     addi   dmaLen, vtxLeft, -1                // Only for above, nop for below
 G_SETOTHERMODE_L_handler:
-    lw      $3, (othermode0 - G_SETOTHERMODE_H_handler)($11) // resolves to othermode0 or othermode1 based on which handler was jumped to
+    lw      $3, (othermode0 - G_SETOTHERMODE_H_handler)($ra) // resolves to othermode0 or othermode1 based on which handler was jumped to
     lui     $2, 0x8000
     srav    $2, $2, cmd_w0
     srl     $1, cmd_w0, 8
@@ -2930,7 +2938,7 @@ G_SETOTHERMODE_L_handler:
     nor     $2, $2, $zero
     and     $3, $3, $2
     or      $3, $3, cmd_w1_dram
-    sw      $3, (othermode0 - G_SETOTHERMODE_H_handler)($11)
+    sw      $3, (othermode0 - G_SETOTHERMODE_H_handler)($ra)
     lw      cmd_w0, otherMode0
     j       G_RDP_handler
      lw     cmd_w1_dram, otherMode1
@@ -2942,24 +2950,16 @@ G_SETSCISSOR_handler:  // $1 is 0 if jumped here
     j       G_RDP_handler                // Send the command to the RDP
      sw     cmd_w1_dram, (scissorBottomRight)($1) // otherMode1 = scissorBottomRight + 8
 
-G_GEOMETRYMODE_handler: // 6
-    lw      $11, geometryModeLabel  // load the geometry mode value
-    and     $11, $11, cmd_w0        // clears the flags in cmd_w0 (set in g*SPClearGeometryMode)
-    or      $11, $11, cmd_w1_dram   // sets the flags in cmd_w1_dram (set in g*SPSetGeometryMode)
-    srl     vGeomMid, $11, 8        // Middle 2 bytes of geom mode to lower 16 bits. Ordered this way to avoid stalls.
-    j       run_next_DL_command     // run the next DL command
-     sw     $11, geometryModeLabel  // Update the geometry mode value
-
 G_TEXTURE_handler: // 4
-    li      $11, textureSettings1 - (texrectWord1 - G_TEXRECTFLIP_handler)  // Calculate the offset from texrectWord1 and $11 for saving to textureSettings
-G_TEXRECT_handler: // $11 contains address of handler
+    li      $ra, textureSettings1 - (texrectWord1 - G_TEXRECTFLIP_handler)  // Calculate the offset from texrectWord1 and $ra for saving to textureSettings
+G_TEXRECT_handler: // $ra contains address of handler
 G_TEXRECTFLIP_handler:
     // Stores first command word into textureSettings for gSPTexture, 0x00D0 for gSPTextureRectangle/Flip
-    sw      cmd_w0, (texrectWord1 - G_TEXRECTFLIP_handler)($11)
+    sw      cmd_w0, (texrectWord1 - G_TEXRECTFLIP_handler)($ra)
 G_RDPHALF_1_handler:
     j       run_next_DL_command
     // Stores second command word into textureSettings for gSPTexture, 0x00D4 for gSPTextureRectangle/Flip, 0x00D8 for G_RDPHALF_1
-     sw     cmd_w1_dram, (texrectWord2 - G_TEXRECTFLIP_handler)($11)
+     sw     cmd_w1_dram, (texrectWord2 - G_TEXRECTFLIP_handler)($ra)
 
 G_RDPHALF_2_handler: // 7
     ldv     $v29[0], (texrectWord1)($zero)
