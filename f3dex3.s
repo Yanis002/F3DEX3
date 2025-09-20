@@ -565,10 +565,10 @@ miniTableEntry G_SETOTHERMODE_L_handler
 miniTableEntry G_SETOTHERMODE_H_handler
 miniTableEntry G_TEXRECT_handler
 miniTableEntry G_TEXRECTFLIP_handler
-miniTableEntry G_SYNC_handler // G_RDPLOADSYNC
-miniTableEntry G_SYNC_handler // G_RDPPIPESYNC
-miniTableEntry G_SYNC_handler // G_RDPTILESYNC
-miniTableEntry G_SYNC_handler // G_RDPFULLSYNC
+miniTableEntry G_RDP_handler // G_RDPLOADSYNC
+miniTableEntry G_RDP_handler // G_RDPPIPESYNC
+miniTableEntry G_RDP_handler // G_RDPTILESYNC
+miniTableEntry G_RDP_handler // G_RDPFULLSYNC
 miniTableEntry G_RDP_handler // G_SETKEYGB
 miniTableEntry G_RDP_handler // G_SETKEYR
 miniTableEntry G_RDP_handler // G_SETCONVERT
@@ -592,7 +592,7 @@ miniTableEntry G_SETxIMG_handler // G_SETTIMG
 miniTableEntry G_SETxIMG_handler // G_SETZIMG
 miniTableEntry G_SETxIMG_handler // G_SETCIMG
 cmdMiniTable:
-miniTableEntry G_SYNC_handler // G_NOOP
+miniTableEntry G_RDP_handler // G_NOOP
 miniTableEntry G_VTX_handler
 miniTableEntry G_MODIFYVTX_handler
 miniTableEntry G_CULLDL_handler
@@ -1192,12 +1192,11 @@ load_cmds_handler:
      lb     $3, materialCullMode
     bltz    $3, run_next_DL_command  // If cull mode is < 0, in mat second time, skip the load
 G_RDP_handler:
-     sw     cmd_w1_dram, 4(rdpCmdBufPtr)     // Add the second word of the command to the RDP command buffer
-G_SYNC_handler:
+     spv    $v4[0], 0(rdpCmdBufPtr)     // Whole command
+commit_small_rdp_command:
 .if CFG_PROFILING_C
     addi    perfCounterC, perfCounterC, 0x4000 // Increment small RDP command count
 .endif
-    sw      cmd_w0, 0(rdpCmdBufPtr)          // Add the command word to the RDP command buffer
     addi    rdpCmdBufPtr, rdpCmdBufPtr, 8    // Increment the next RDP command pointer by 2 words
 check_rdp_buffer_full_and_run_next_cmd:
     sub     dmemAddr, rdpCmdBufPtr, rdpCmdBufEndP1
@@ -1213,6 +1212,7 @@ G_SPNOOP_handler:
 run_next_DL_command:
      mfc0   $1, SP_STATUS                               // load the status word into register $1
     lw      cmd_w0, (inputBufferEnd)(inputBufferPos)    // load the command word into cmd_w0
+    lpv     $v4[0], (inputBufferEndSgn)(inputBufferPos) // Whole command
     beqz    inputBufferPos, displaylist_dma             // load more DL commands if none are left
      andi   $1, $1, SP_STATUS_SIG0                      // check if the task should yield
     sra     $7, cmd_w0, 24                              // extract DL command byte from command word
@@ -1268,22 +1268,22 @@ do_moveword:
      sw     cmd_w1_dram, ($10)       // Store value from cmd into word (offset + moveword_table[index])
 
 G_LOAD_UCODE_handler: // 4
-    j       load_overlay_0_and_enter         // Delay slot is harmless
+    j       load_overlay_0_and_enter     // Delay slot is harmless
 G_MODIFYVTX_handler:
-     lhu    $10, (vertexTable)(cmd_w0)       // Byte 3 = vtx being modified
+     lhu    $10, (vertexTable)(cmd_w0)   // Byte 3 = vtx being modified
     j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
      lbu    cmd_w0, (inputBufferEnd - 0x07)(inputBufferPos)  // offset in vtx, bit 15 clear
 
 .if !ENABLE_PROFILING
 G_LIGHTTORDP_handler: // 9
+    sw      cmd_w1_dram, 0(rdpCmdBufPtr) // Store second word as first (cmd byte, prim level)
     lbu     $11, numLightsxSize          // Ambient light
     lbu     $1, (inputBufferEnd - 0x6)(inputBufferPos) // Byte 2 = light count from end * size
     andi    $2, cmd_w0, 0x00FF           // Byte 3 = alpha
     sub     $1, $11, $1                  // Light address; byte 2 counts from end
     lw      $3, (lightBufferMain-1)($1)  // Load light RGB into lower 3 bytes
-    move    cmd_w0, cmd_w1_dram          // Move second word to first (cmd byte, prim level)
     sll     $3, $3, 8                    // Shift light RGB to upper 3 bytes and clear alpha byte
-    j       G_RDP_handler                // Send to RDP
+    j       send_w1_to_rdp               // Write word w1 to RDP
      or     cmd_w1_dram, $3, $2          // Combine RGB and alpha in second word
 .endif
 
@@ -2921,7 +2921,7 @@ G_GEOMETRYMODE_handler: // 6
     j       run_next_DL_command     // run the next DL command
      sw     $11, geometryModeLabel  // Update the geometry mode value
 
-G_VTX_handler: // 19
+G_VTX_handler: // 18
     lhu     dmemAddr, (vertexTable)(cmd_w0)    // (v0 + n) end address; up to 56 inclusive
     jal     segmented_to_physical              // Convert address in cmd_w1_dram to physical
      lhu    vtxLeft, (inputBufferEnd - 0x07)(inputBufferPos) // vtxLeft = size in bytes = vtx count * 0x10
@@ -2940,16 +2940,8 @@ G_SETOTHERMODE_L_handler:
     and     $3, $3, $2
     or      $3, $3, cmd_w1_dram
     sw      $3, (othermode0 - G_SETOTHERMODE_H_handler)($ra)
-    lw      cmd_w0, otherMode0
     j       G_RDP_handler
-     lw     cmd_w1_dram, otherMode1
-
-G_RDPSETOTHERMODE_handler: // 4
-    li      $1, 8      // Offset from scissor DMEM to othermode DMEM
-G_SETSCISSOR_handler:  // $1 is 0 if jumped here
-    sw      cmd_w0, (scissorUpLeft)($1) // otherMode0 = scissorUpLeft + 8
-    j       G_RDP_handler                // Send the command to the RDP
-     sw     cmd_w1_dram, (scissorBottomRight)($1) // otherMode1 = scissorBottomRight + 8
+     lpv    $v4[0], (otherMode0)($zero)
 
 G_TEXTURE_handler: // 4
     li      $ra, textureSettings1 - (texrectWord1 - G_TEXRECTFLIP_handler)  // Calculate the offset from texrectWord1 and $ra for saving to textureSettings
@@ -2964,27 +2956,42 @@ G_RDPHALF_1_handler:
 
 G_RDPHALF_2_handler: // 7
     ldv     $v29[0], (texrectWord1)($zero)
+    sb      $zero, materialCullMode         // This covers tex and fill rects
     lw      cmd_w0, rdpHalf1Val             // load the RDPHALF1 value into w0
     addi    rdpCmdBufPtr, rdpCmdBufPtr, 8
 .if !ENABLE_PROFILING
     addi    perfCounterB, perfCounterB, 1   // Increment number of tex/fill rects
+.elseif !CFG_PROFILING_C
+    vnop // For G_RDPSETOTHERMODE_handler alignment below, without taking a cycle
 .endif
-    sb      $zero, materialCullMode         // This covers tex and fill rects
-    j       G_RDP_handler
+    j       send_w0_w1_to_rdp               // w1 is from the current command
      sdv    $v29[0], -8(rdpCmdBufPtr)
 
-G_SETxIMG_handler: // 10
+G_SETSCISSOR_handler:
+    li      $ra, scissorUpLeft - (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))
+G_RDPSETOTHERMODE_handler: // $ra = .
+.if (. & 4) != 0
+    .error "G_RDPSETOTHERMODE_handler alignment broken"
+.endif
+    j       G_RDP_handler  // Send the command to the RDP
+     spv    $v4[0], (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))($ra)
+
+G_SETxIMG_handler: // 12
     lb      $3, materialCullMode            // Get current mode
     jal     segmented_to_physical           // Convert image to physical address
      lw     $2, lastMatDLPhyAddr            // Get last material physical addr
-    bnez    $3, G_RDP_handler               // If not in normal mode (0), exit
+    bnez    $3, send_w0_w1_to_rdp           // If not in normal mode (0), exit
      add    $10, taskDataPtr, inputBufferPos // Current material physical addr
     beq     $10, $2, @@skip                 // Branch if we are executing the same mat again
      sw     $10, lastMatDLPhyAddr           // Store material physical addr
     li      $7, 1                           // > 0: in material first time
 @@skip:                                     // Otherwise $7 was < 0: cull mode (in mat second time)
-    j       G_RDP_handler
-     sb     $7, materialCullMode
+    sb      $7, materialCullMode
+send_w0_w1_to_rdp:
+    sw      cmd_w0, 0(rdpCmdBufPtr)
+send_w1_to_rdp:
+    j       commit_small_rdp_command
+     sw     cmd_w1_dram, 4(rdpCmdBufPtr)
 
 ovl1_end:
 align_with_warning 8, "One instruction of padding at end of ovl1"
