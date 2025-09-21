@@ -1153,6 +1153,7 @@ displaylist_dma_tri_snake:
     move    cmd_w1_dram, taskDataPtr                   // set up the DRAM address to read from
     sub     taskDataPtr, taskDataPtr, inputBufferPos   // increment the DRAM address to read from next time
     addi    dmemAddr, inputBufferPos, inputBufferEnd   // set the address to DMA read to
+
 dma_and_wait_goto_next_ra:
     j       dma_read_write
      li     $ra, wait_goto_next_ra
@@ -1189,7 +1190,7 @@ commit_small_rdp_command:
 check_rdp_buffer_full_and_run_next_cmd:
     sub     dmemAddr, rdpCmdBufPtr, rdpCmdBufEndP1
     bgezal  dmemAddr, flush_rdp_buffer
-     // $1 on next instr survives flush_rdp_buffer
+     // $7 on next instr survives flush_rdp_buffer
 .if !CFG_PROFILING_A
 tris_end:
 .endif
@@ -1198,15 +1199,16 @@ G_LIGHTTORDP_handler:
 .endif
 G_SPNOOP_handler:
 run_next_DL_command:
+    // TODO
      mfc0   $1, SP_STATUS                               // load the status word into register $1
-    lw      cmd_w0, (inputBufferEnd)(inputBufferPos)    // load the command word into cmd_w0
-    lpv     $v4[0], (inputBufferEndSgn)(inputBufferPos) // Whole command
-    beqz    inputBufferPos, displaylist_dma             // load more DL commands if none are left
-     andi   $1, $1, SP_STATUS_SIG0                      // check if the task should yield
-    sra     $7, cmd_w0, 24                              // extract DL command byte from command word
-    lbu     $ra, (cmdMiniTable)($7)                     // Load mini table entry
+    andi    $1, $1, SP_STATUS_SIG0                      // check if the task should yield
     bnez    $1, load_overlay_0_and_enter                // load and execute overlay 0 if yielding; $1 > 0
-     lw     cmd_w1_dram, (inputBufferEnd + 4)(inputBufferPos) // load the next DL word into cmd_w1_dram
+     lb     $7, (inputBufferEnd)(inputBufferPos)        // Command byte
+    lpv     $v4[0], (inputBufferEndSgn)(inputBufferPos) // Whole command
+    beqz    inputBufferPos, displaylist_dma             // Check if buffer is empty
+     lbu    $ra, (cmdMiniTable)($7)                     // Load mini table entry
+    lw      cmd_w0, (inputBufferEnd)(inputBufferPos)    // Word 0
+    lw      cmd_w1_dram, (inputBufferEnd + 4)(inputBufferPos) // Word 1
     sll     $ra, $ra, 2                                 // Convert to a number of instructions
 .if CFG_PROFILING_C
     mfc0    $10, DPC_STATUS
@@ -1226,8 +1228,7 @@ run_next_DL_command:
 .endif
     jr      $ra                                         // Jump to handler
      addi   inputBufferPos, inputBufferPos, 0x0008      // increment the DL index by 2 words
-    // $1 must remain zero
-    // $7 must retain the command byte for load_mtx and overlay 3 stuff
+    // $7 must retain the command byte for load_mtx and command dispatch in overlays 2 and 3
     // $ra must contain the handler called for several handlers
 
 G_LOAD_UCODE_handler: // 4
@@ -1244,11 +1245,12 @@ G_MTX_handler: // 12
     andi    $11, cmd_w0, G_MTX_VP_M | G_MTX_NOPUSH_PUSH
     beqz    $11, ovl234_ltbasic_entrypoint   // Model and push: go to overlay for push
      sh     $zero, mvpValid                  // Also zeroes dirLightsXfrmValid
-load_mtx:
-    andi    $1, cmd_w0, G_MTX_MUL_LOAD       // Read the matrix load type into $1 (2 is multiply, 0 is load)
-G_MOVEMEM_handler:  // Otherwise $1 is 0
+load_mtx: // Coming from mtx_push
+    andi    $7, cmd_w0, G_MTX_MUL_LOAD       // Matrix load type: 2 is multiply, 0 is load
+    addi    $7, $7, (-0x100 | G_MOVEMEM)     // As if came from G_MOVEMEM_handler, or +2 for multiply
+G_MOVEMEM_handler: // If called this handler, $7 = (-0x100 | G_MOVEMEM)
     jal     segmented_to_physical   // convert the memory address cmd_w1_dram to a virtual one
-do_movemem:
+do_movemem: // Coming from popmtx; $7 was set to (-0x100 | G_MOVEMEM)
      // 0: load M, 2: mul M -> load temp, 4: load VP, 6: mul VP -> load temp
      andi   $3, cmd_w0, 0x00FE            // Movemem table index into $1 (bits 1-7 of the word 0)
     lbu     dmaLen, (inputBufferEnd - 0x07)(inputBufferPos) // Second byte of word 0
@@ -1256,7 +1258,7 @@ do_movemem:
     srl     $2, cmd_w0, 5                 // ((w0) >> 8) << 3; top 3 bits of idx must be 0; lower 1 bit of len byte must be 0
     add     dmemAddr, dmemAddr, $2
     j       dma_and_wait_goto_next_ra
-     lh     nextRA, (afterMovememRaTable)($1) // $1 is 2 if mtx multiply, else 0
+     lh     nextRA, (afterMovememRaTable - (-0x100 | G_MOVEMEM))($7)
 
 .if !ENABLE_PROFILING
 G_LIGHTTORDP_handler: // 9
@@ -1826,6 +1828,7 @@ ovl234_clipmisc_entrypoint:
 .if CFG_PROFILING_B
     nop                                    // Needs to take up the space for the other perf counter
 .endif
+    // TODO
     bnez    $1, vtx_constants_for_clip     // In clipping, $1 is vtx 1 addr, never 0. Cmd dispatch, $1 = 0.
      li     inVtx, -0x8000                 // inVtx < 0 means from clipping. Inc'd each vtx write by 2 * inputVtxSize, but this is large enough it should stay negative.
     lw      cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Overwritten by overlay load
@@ -2746,6 +2749,7 @@ dma_write:
 // Overlay 0 handles three cases of stopping the current microcode.
 // The action here is controlled by $1. If yielding, $1 > 0. If this was
 // G_LOAD_UCODE, $1 == 0. If we got to the end of the parent DL, $1 < 0.
+// TODO
 ovl0_start:
     jal     flush_rdp_buffer   // See G_FLUSH_handler for docs on these 3 instructions.
      sub    dmemAddr, rdpCmdBufPtr, rdpCmdBufEndP1
@@ -2960,8 +2964,8 @@ G_SETOTHERMODE_L_handler:
     lw      $3, (othermode0 - G_SETOTHERMODE_H_handler)($ra) // resolves to othermode0 or othermode1 based on which handler was jumped to
     lui     $2, 0x8000
     srav    $2, $2, cmd_w0
-    srl     $1, cmd_w0, 8
-    srlv    $2, $2, $1
+    srl     $11, cmd_w0, 8
+    srlv    $2, $2, $11
     nor     $2, $2, $zero
     and     $3, $3, $2
     or      $3, $3, cmd_w1_dram
@@ -3042,6 +3046,7 @@ ovl234_clipmisc_entrypoint_ovl2ver:        // same IMEM address as ovl234_clipmi
      li     cmd_w1_dram, orga(ovl3_start)  // set up a load for overlay 3
 
 ltbasic_continue_setup:
+    // TODO
     beqz    $1, ltbasic_command_handlers
      addi   ambLight, ambLight, altBase    // Point to ambient light; stored through vtx proc
     bnez    viLtFlag, ltbasic_setup_after_xfrm  // Skip if lights were valid
@@ -3426,8 +3431,9 @@ g_popmtx_ovl2:  // otherwise
      sh     $zero, mvpValid                 // and dirLightsXfrmValid; mark both mtx and dir lts invalid
     move    cmd_w1_dram, $2                 // Use the top of the stack as the new pointer
 @@skip:    
-    j       do_movemem                      // Must keep $1 = 0
-     sw     cmd_w1_dram, matrixStackPtr     // Update the matrix stack pointer
+    sw      cmd_w1_dram, matrixStackPtr     // Update the matrix stack pointer
+    j       do_movemem
+     li     $7, (-0x100 | G_MOVEMEM)        // As if came from G_MOVEMEM_handler, don't multiply
 
 g_mtx_push_ovl2:
     lw      cmd_w1_dram, matrixStackPtr     // Set up the DMA from dmem to rdram at the matrix stack pointer
