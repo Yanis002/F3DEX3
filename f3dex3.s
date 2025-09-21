@@ -1167,7 +1167,7 @@ G_SETxIMG_handler: // 12
     beq     $10, $2, @@skip                 // Branch if we are executing the same mat again
      sw     $10, lastMatDLPhyAddr           // Store material physical addr
     li      $7, 1                           // > 0: in material first time
-@@skip:                                     // Otherwise $7 was < 0: cull mode (in mat second time)
+@@skip:                                     // Otherwise $7 was < 0 (SETxIMG command byte): cull mode (in mat second time)
     sb      $7, materialCullMode
 send_w0_w1_to_rdp:
     sw      cmd_w0, 0(rdpCmdBufPtr)
@@ -1828,9 +1828,11 @@ ovl234_clipmisc_entrypoint:
 .if CFG_PROFILING_B
     nop                                    // Needs to take up the space for the other perf counter
 .endif
-    // TODO
-    bnez    $1, vtx_constants_for_clip     // In clipping, $1 is vtx 1 addr, never 0. Cmd dispatch, $1 = 0.
+    bgez    $7, vtx_constants_for_clip     // $7 < 0: cmd byte. >= 0: vtx 2 clip flags with lhu.
      li     inVtx, -0x8000                 // inVtx < 0 means from clipping. Inc'd each vtx write by 2 * inputVtxSize, but this is large enough it should stay negative.
+.if !(G_MEMSET & 0x80)
+    .error "Command handlers in ovl3 < 0 assumption broken"
+.endif
     lw      cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Overwritten by overlay load
 g_memset_ovl3:
     llv     $v2[0], (rdpHalf1Val - altBase)(altBaseReg) // Load the memset value
@@ -2227,7 +2229,7 @@ vtx_after_setup_constants:
     li      dmemAddr, mMatrix
     jal     mtx_multiply
      li     $3, mvpMatrix
-    sb      $10, mvpValid  // $10 is nonzero from mtx_multiply, in fact 0x18
+    sb      $10, mvpValid  // $10 is nonzero from mtx_multiply, in fact 0x18. Must be >= 0 to distinguish from cmds
 @@skip_recalc_mvp:
     andi    $11, vGeomMid, G_LIGHTING >> 8
     bnez    $11, vtx_select_lighting
@@ -3046,8 +3048,7 @@ ovl234_clipmisc_entrypoint_ovl2ver:        // same IMEM address as ovl234_clipmi
      li     cmd_w1_dram, orga(ovl3_start)  // set up a load for overlay 3
 
 ltbasic_continue_setup:
-    // TODO
-    beqz    $1, ltbasic_command_handlers
+    bltz    $7, ltbasic_command_handlers   // $7 < 0: cmd byte. >= 0: mtx valid (0 or 0x18)
      addi   ambLight, ambLight, altBase    // Point to ambient light; stored through vtx proc
     bnez    viLtFlag, ltbasic_setup_after_xfrm  // Skip if lights were valid
      addi   lbFakeAmb, ambLight, ltBufOfs  // Ptr to load amb light from; normally actual ambient light
@@ -3417,6 +3418,9 @@ lLkDt1 equ lDOT    // lighting Lookat Dot product 1
      texgen_lastinstr lLkDt0, lLkDt1
 
 ltbasic_command_handlers:
+.if !(G_POPMTX & 0x80) || !(G_MTX & 0x80) || !(G_DMA_IO & 0x80)
+    .error "Command handlers in ovl2 < 0 assumption broken"
+.endif
     lw      cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Overwritten by overlay load
     li      $11, -0x100 | G_MTX
     beq     $11, $7, g_mtx_push_ovl2
