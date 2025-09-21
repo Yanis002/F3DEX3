@@ -263,9 +263,7 @@ texrectWord1:
 texrectWord2:
     .fill 4 // second word, has tile, xl, yl
 
-// First half of RDP value for split commands. Also used as temp storage for
-// tri vertices during tri commands.
-rdpHalf1Val:
+unused3:
     .fill 4
     
 activeClipPlanes:
@@ -405,18 +403,6 @@ occlusionPlaneMidCoeffs:
 .endif
 altBase:
 
-textureSettings1:
-    .dw 0x00000000 // first word, has command byte, level, tile, and on
-    
-textureSettings2:
-    .dw 0xFFFFFFFF // second word, has s and t scale
-    
-geometryModeLabel:
-    .dw 0x00000000 // originally initialized to G_CLIPPING, but that does nothing
-    
-fogFactor:
-    .dw 0x00000000
-
 // constants for register vTRC
 .if (. & 15) != 0
     .error "Wrong alignment for vTRCValue"
@@ -448,11 +434,10 @@ vTRC_0100 equ vTRC[6]
 vTRC_1000 equ vTRC[7]
 vTRC_0100_addr equ (vTRCValue + 2 * 6)
 
-fxParams:
-
 .if (. & 15) != 0
     .error "Wrong alignment for fxParams"
 .endif
+fxParams:
 // First 8 values here loaded with lqv.
 
 aoAmbientFactor:
@@ -485,18 +470,43 @@ alphaCompareCullThresh:
     
 lastMatDLPhyAddr:
     .dw 0
-    
+
+.if (. - fxParams) != 0x1A
+    .error "Update fxParams MWO in GBI"
+.endif
+
 packedNormalsMaskConstant:
     .db 0xF8 // When read, materialCullMode has been zeroed, so read as 0xF800
 materialCullMode:
     .db 0
     
+geometryModeLabel:
+    .dw 0x00000000
+
+.if (. & 7) != 0
+    .error "textureSettings align to 8 broken"
+.endif
+
+textureSettings1:
+    .dw 0x00000000 // first word, has command byte, level, tile, and on
+    
+textureSettings2:
+    .dw 0xFFFFFFFF // second word, has s and t scale
+    
+fogFactor:
+    .dw 0x00000000
+
+// First half of RDP value for split commands. Also used as temp storage for
+// tri vertices during tri commands.
+rdpHalf1Val:
+    .fill 4
+
 // moveword table
 movewordTable:
     .dh fxParams           // G_MW_FX
     .dh numLightsxSize - 3 // G_MW_NUMLIGHT; writes numLightsxSize and pointLightFlag, zeroes dirLightsXfrmValid
 packedNormalsConstants:
-.if (. & 4) != 0
+.if (. & 3) != 0
     .error "Alignment broken for packed normals constants in movewordTable"
 .endif
     .dh 0x2008             // For packed normals; unused in movewordTable
@@ -1155,7 +1165,7 @@ G_BRANCH_WZ_handler:
     sub     $2, $10, cmd_w1_dram        // subtract the w/z value being tested
     bgez    $2, run_next_DL_command     // if vtx.w/z >= cmd w/z, continue running this DL
      lw     cmd_w1_dram, rdpHalf1Val    // load the RDPHALF1 value as the location to branch to
-    li      cmd_w0, 0x8000              // Bit 16 set (via negative) = nopush, bits 3-7 = 0 for hint
+    li      cmd_w0, -0x8000             // Bit 16 set (via negative) = nopush, bits 3-7 = 0 for hint
 G_DL_handler:
     sll     $2, cmd_w0, 15                  // Shifts the push/nopush value to the sign bit
     lbu     $1, displayListStackLength      // Get the DL stack length
@@ -1258,7 +1268,7 @@ G_RELSEGMENT_handler: // 9
     jal     segmented_to_physical    // Resolve new segment address relative to existing segment
 G_MOVEWORD_handler:
      srl    $2, cmd_w0, 16           // load the moveword command and word index into $2 (e.g. 0xDB06 for G_MW_SEGMENT)
-    lhu     $10, (movewordTable - (G_MOVEWORD << 8))($2) // subtract the moveword label and offset the word table by the word index (e.g. 0xDB06 becomes 0x0304)
+    lhu     $10, (movewordTable - ((G_MOVEWORD & 0xF) << 8))($2) // subtract the moveword label and offset the word table by the word index (e.g. 0xDB06 becomes 0x0304)
 do_moveword:
     sll     $11, cmd_w0, 16          // Sign bit = upper bit of offset
     add     $10, $10, cmd_w0         // Offset + base; only lower 12 bits matter
@@ -1311,7 +1321,7 @@ tri_snake_loop_from_input_buffer:
     andi    origV1Idx, $3, 0x7E          // New v1 = mask out flags from index c
     sb      origV1Idx, rdpHalf1Val + 1   // Store index c as vertex 1
     j       tri_main_from_snake          // Repeat next instr so we can skip lbu origV1Idx
-     lpv    $v7[4], (rdpHalf1Val)($zero) // To vector unit in elems 5-7
+     lpv    $v7[0], (rdpHalf1Val - 4 - altBase)(altBaseReg) // To vector unit in elems 5-7
 
 // H = highest on screen = lowest Y value; then M = mid, L = low
 tHAtF equ $v5
@@ -1338,7 +1348,7 @@ G_TRI1_handler:
     li      $ra, tris_end                // After done with this tri, exit tri processing
     sw      cmd_w0, rdpHalf1Val          // Store first tri indices
 tri_main:
-    lpv     $v7[4], (rdpHalf1Val)($zero) // To vector unit in elems 5-7
+    lpv     $v7[0], (rdpHalf1Val - 4 - altBase)(altBaseReg) // To vector unit in elems 5-7
     lbu     origV1Idx, rdpHalf1Val + 1
 tri_main_from_snake:
     lbu     $2, rdpHalf1Val + 2
@@ -1792,7 +1802,7 @@ tri_snake_over_input_buffer:
      li     nextRA, tri_snake_ret_from_input_buffer // inputBufferPos is now 0; load whole buffer
 tri_snake_end:
     addi    inputBufferPos, inputBufferPos, 7 // Round up to whole input command
-    addi    $11, $zero, 0xFFF8               // Sign-extend; andi is zero-extend!
+    addi    $11, $zero, 0xFFFFFFF8            // Sign-extend; andi is zero-extend!
     j       tris_end
      and    inputBufferPos, inputBufferPos, $11 // inputBufferPos has to be negative
 
@@ -1843,10 +1853,10 @@ ovl234_clipmisc_entrypoint:
     nop                                    // Needs to take up the space for the other perf counter
 .endif
     bnez    $1, vtx_constants_for_clip     // In clipping, $1 is vtx 1 addr, never 0. Cmd dispatch, $1 = 0.
-     li     inVtx, 0x8000                  // inVtx < 0 means from clipping. Inc'd each vtx write by 2 * inputVtxSize, but this is large enough it should stay negative.
+     li     inVtx, -0x8000                 // inVtx < 0 means from clipping. Inc'd each vtx write by 2 * inputVtxSize, but this is large enough it should stay negative.
     lw      cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Overwritten by overlay load
 g_memset_ovl3:
-    llv     $v2[0], (rdpHalf1Val)($zero) // Load the memset value
+    llv     $v2[0], (rdpHalf1Val - altBase)(altBaseReg) // Load the memset value
     sll     cmd_w0, cmd_w0, 8           // Clear upper byte
     jal     segmented_to_physical
      srl    cmd_w0, cmd_w0, 8           // Number of bytes to memset (must be mult of 16)
@@ -1860,7 +1870,7 @@ g_memset_ovl3:
      addi   $2, -0x10
 @@transaction_loop:
     jal     @@clamp_to_memset_buffer
-     li     dmemAddr, 0x8000 | memsetBufferStart  // Always write from start of buffer
+     li     dmemAddr, -0x8000 | memsetBufferStart  // Always write from start of buffer
     jal     dma_read_write
      addi   dmaLen, $2, -1
     sub     cmd_w0, cmd_w0, $2
@@ -1923,7 +1933,7 @@ clip_remove_loop:
     sh      $zero, (clipPoly + 0)
     // Deallocate it. The first iteration is for if it's in the main vertex buffer,
     // in which case the deallocation is a no-op.
-    li      $11, 0xFEFF // 0b...111011111111 (8 set to the right of the 0)
+    li      $11, 0xFFFFFEFF // 0b...111011111111 (8 set to the right of the 0)
     addi    $10, clipCurVtx, -(clipTempVerts - vtxSize)
 clip_deallocate_loop:
     addi    $10, $10, -vtxSize
@@ -2812,7 +2822,7 @@ task_done_or_yield:
 task_yield: // Otherwise $1 > 0 = CPU requested yield
     lw      $11, OSTask + OSTask_ucode         // Save pointer to current ucode
     lw      cmd_w1_dram, OSTask + OSTask_yield_data_ptr
-    li      dmemAddr, 0x8000                   // 0, but negative = write
+    li      dmemAddr, -0x8000                  // 0, but negative = write
     li      dmaLen, OS_YIELD_DATA_SIZE - 1
     li      $10, SP_SET_SIG1 | SP_SET_SIG2     // yielded and task done signals
     sw      taskDataPtr, yieldDataFooter + YDF_OFFSET_TASKDATAPTR // Save pointer to where in DL
@@ -2824,7 +2834,7 @@ task_done:
     // Copy just the yield data footer, which has the perf counters.
     lw      cmd_w1_dram, OSTask + OSTask_yield_data_ptr
     addi    cmd_w1_dram, cmd_w1_dram, yieldDataFooter
-    li      dmemAddr, 0x8000 | yieldDataFooter // negative = write
+    li      dmemAddr, -0x8000 | yieldDataFooter // negative = write
     jal     dma_read_write
      li     dmaLen, YIELD_DATA_FOOTER_SIZE - 1
     jal     while_wait_dma_busy
@@ -2913,14 +2923,6 @@ mtx_multiply:
     jr      $ra
      sqv    $v5[0], (0x0030)($3)
 
-G_GEOMETRYMODE_handler: // 6
-    lw      $11, geometryModeLabel  // load the geometry mode value
-    and     $11, $11, cmd_w0        // clears the flags in cmd_w0 (set in g*SPClearGeometryMode)
-    or      $11, $11, cmd_w1_dram   // sets the flags in cmd_w1_dram (set in g*SPSetGeometryMode)
-    srl     vGeomMid, $11, 8        // Middle 2 bytes of geom mode to lower 16 bits. Ordered this way to avoid stalls.
-    j       run_next_DL_command     // run the next DL command
-     sw     $11, geometryModeLabel  // Update the geometry mode value
-
 G_VTX_handler: // 18
     lhu     dmemAddr, (vertexTable)(cmd_w0)    // (v0 + n) end address; up to 56 inclusive
     jal     segmented_to_physical              // Convert address in cmd_w1_dram to physical
@@ -2943,13 +2945,24 @@ G_SETOTHERMODE_L_handler:
     j       G_RDP_handler
      lpv    $v4[0], (otherMode0)($zero)
 
+G_GEOMETRYMODE_handler: // 6
+    lw      $11, geometryModeLabel        // load the geometry mode value
+    and     $11, $11, cmd_w0              // clears the flags in cmd_w0 (set in g*SPClearGeometryMode)
+    or      cmd_w1_dram, cmd_w1_dram, $11 // sets the flags in cmd_w1_dram (set in g*SPSetGeometryMode)
+    srl     vGeomMid, cmd_w1_dram, 8      // Middle 2 bytes of geom mode to lower 16 bits. Ordered this way to avoid stalls.
+G_RDPHALF_1_handler: // $ra = ., 0x10 ahead of geometry mode
+.if (G_RDPHALF_1_handler - G_GEOMETRYMODE_handler) != (rdpHalf1Val - geometryModeLabel)
+    .error "G_RDPHALF_1 optimization broken"
+.endif
+    j       run_next_DL_command
+     sw     cmd_w1_dram, (geometryModeLabel - G_GEOMETRYMODE_handler)($ra)
+
 G_TEXTURE_handler: // 4
     li      $ra, textureSettings1 - (texrectWord1 - G_TEXRECTFLIP_handler)  // Calculate the offset from texrectWord1 and $ra for saving to textureSettings
 G_TEXRECT_handler: // $ra contains address of handler
 G_TEXRECTFLIP_handler:
     // Stores first command word into textureSettings for gSPTexture, 0x00D0 for gSPTextureRectangle/Flip
     sw      cmd_w0, (texrectWord1 - G_TEXRECTFLIP_handler)($ra)
-G_RDPHALF_1_handler:
     j       run_next_DL_command
     // Stores second command word into textureSettings for gSPTexture, 0x00D4 for gSPTextureRectangle/Flip, 0x00D8 for G_RDPHALF_1
      sw     cmd_w1_dram, (texrectWord2 - G_TEXRECTFLIP_handler)($ra)
@@ -3170,7 +3183,7 @@ ltbasic_setup_after_xfrm:
     andi    $11, vGeomMid, G_TEXTURE_GEN >> 8
     beqz    $11, @@skip_texgen
      andi   $10, vGeomMid, G_PACKED_NORMALS >> 8
-    li      lbAfter, 0x8000 | ltbasic_texgen // Negative is used as flag
+    li      lbAfter, -0x8000 | ltbasic_texgen // Negative is used as flag
 @@skip_texgen:
     beqz    $10, @@skip_packed
      move   lbTexgenOrRet, lbAfter
@@ -3413,9 +3426,9 @@ lLkDt1 equ lDOT    // lighting Lookat Dot product 1
 
 ltbasic_command_handlers:
     lw      cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Overwritten by overlay load
-    li      $11, (0xFF00 | G_MTX)
+    li      $11, -0x100 | G_MTX
     beq     $11, $7, g_mtx_push_ovl2
-     li     $3, (0xFF00 | G_DMA_IO)
+     li     $3, -0x100 | G_DMA_IO
     beq     $3, $7, g_dma_io_ovl2
 g_popmtx_ovl2:  // otherwise
      lw     $11, matrixStackPtr             // Current matrix stack pointer
@@ -3431,7 +3444,7 @@ g_popmtx_ovl2:  // otherwise
 
 g_mtx_push_ovl2:
     lw      cmd_w1_dram, matrixStackPtr     // Set up the DMA from dmem to rdram at the matrix stack pointer
-    li      dmemAddr, (mMatrix | 0x8000)    // mMatrix, negative = write
+    li      dmemAddr, -0x8000 | mMatrix     // mMatrix, negative = write
     jal     dma_read_write                  // DMA the current matrix from dmem to rdram
      li     dmaLen, 0x0040 - 1              // Set the DMA length to the size of a matrix (minus 1 because DMA is inclusive)
     addi    cmd_w1_dram, cmd_w1_dram, 0x40  // Increase the matrix stack pointer by the size of one matrix
