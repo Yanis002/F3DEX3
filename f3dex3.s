@@ -254,14 +254,8 @@ otherMode0: // command byte included, same as above
 otherMode1:
     .dw 0x00000000
 
-// TODO: This is unnecessary, the state only has to be saved between the two
-// commands making up the texrect command. Could put this in the part of the
-// clip buffer that's kept over yields.
-// Saved texrect state for combining the multiple input commands into one RDP texrect command
-texrectWord1:
-    .fill 4 // first word, has command byte, xh and yh
-texrectWord2:
-    .fill 4 // second word, has tile, xl, yl
+unused4:
+    .fill 8
 
 unused3:
     .fill 4
@@ -573,8 +567,8 @@ miniTableEntry G_SPNOOP_handler
 miniTableEntry G_RDPHALF_1_handler
 miniTableEntry G_SETOTHERMODE_L_handler
 miniTableEntry G_SETOTHERMODE_H_handler
-miniTableEntry G_TEXRECT_handler
-miniTableEntry G_TEXRECTFLIP_handler
+miniTableEntry G_TEXRECT_handler // G_TEXRECT
+miniTableEntry G_TEXRECT_handler // G_TEXRECTFLIP
 miniTableEntry G_RDP_handler // G_RDPLOADSYNC
 miniTableEntry G_RDP_handler // G_RDPPIPESYNC
 miniTableEntry G_RDP_handler // G_RDPTILESYNC
@@ -678,17 +672,23 @@ clipTempVerts:
 vertexTable:
     .skip ((G_MAX_VERTS + 8) * 2) // halfword for each vertex; need 1 extra end addr, easier to write 8 extra
     
-.if . > yieldDataFooter
-    // Need to fit everything through vertex buffer in yield buffer, would like
-    // to also fit vertexTable to avoid recompute after yield
-    .error "Too much being stored in yieldable DMEM"
-.endif
 .if (. & 15) != 0
     .error "tempMatrix not aligned"
 .endif
 
 tempMatrix:
-    .skip 0x40
+texrectState:
+    .skip 8  // Only needs to be saved over texrect, half1, half2; but yield can happen
+
+.if . > yieldDataFooter
+    // Need to fit everything through vertex buffer in yield buffer, and also texrectState.
+    // Would like to also fit vertexTable to avoid recompute after yield.
+    // Putting texrectState after vertexTable for alignment reasons.
+    .error "Too much being stored in yieldable DMEM"
+.endif
+
+    // Rest of tempMatrix
+    .skip 0x40 - 8
 
 .if . > (clipTempVerts + CLIP_TEMP_VERTS_SIZE_BYTES)
     .error "Too much in clipTempVerts"
@@ -2957,33 +2957,39 @@ G_RDPHALF_1_handler: // $ra = ., 0x10 ahead of geometry mode
     j       run_next_DL_command
      sw     cmd_w1_dram, (geometryModeLabel - G_GEOMETRYMODE_handler)($ra)
 
-G_TEXTURE_handler: // 4
-    li      $ra, textureSettings1 - (texrectWord1 - G_TEXRECTFLIP_handler)  // Calculate the offset from texrectWord1 and $ra for saving to textureSettings
-G_TEXRECT_handler: // $ra contains address of handler
-G_TEXRECTFLIP_handler:
-    // Stores first command word into textureSettings for gSPTexture, 0x00D0 for gSPTextureRectangle/Flip
-    sw      cmd_w0, (texrectWord1 - G_TEXRECTFLIP_handler)($ra)
-    j       run_next_DL_command
-    // Stores second command word into textureSettings for gSPTexture, 0x00D4 for gSPTextureRectangle/Flip, 0x00D8 for G_RDPHALF_1
-     sw     cmd_w1_dram, (texrectWord2 - G_TEXRECTFLIP_handler)($ra)
+.if !CFG_PROFILING_C
+    nop // TODO
+.endif
 
-G_RDPHALF_2_handler: // 7
-    ldv     $v29[0], (texrectWord1)($zero)
+G_TEXRECT_handler:
+    li      $ra, texrectState - (textureSettings1 - (G_TEXTURE_handler & 0xFFF))
+G_TEXTURE_handler: // $ra = .
+.if (. & 7) != 0
+    .error "G_TEXTURE_handler alignment broken"
+.endif
+    j       run_next_DL_command
+     spv    $v4[0], (textureSettings1 - (G_TEXTURE_handler & 0xFFF))($ra)
+
+G_RDPHALF_2_handler: // 8
+    li      $11, texrectState
+    ldv     $v29[0], (0)($11)
     sb      $zero, materialCullMode         // This covers tex and fill rects
     lw      cmd_w0, rdpHalf1Val             // load the RDPHALF1 value into w0
     addi    rdpCmdBufPtr, rdpCmdBufPtr, 8
 .if !ENABLE_PROFILING
     addi    perfCounterB, perfCounterB, 1   // Increment number of tex/fill rects
-.elseif !CFG_PROFILING_C
+.else
     vnop // For G_RDPSETOTHERMODE_handler alignment below, without taking a cycle
 .endif
     j       send_w0_w1_to_rdp               // w1 is from the current command
      sdv    $v29[0], -8(rdpCmdBufPtr)
 
+    nop // TODO
+
 G_SETSCISSOR_handler:
     li      $ra, scissorUpLeft - (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))
 G_RDPSETOTHERMODE_handler: // $ra = .
-.if (. & 4) != 0
+.if (. & 7) != 0
     .error "G_RDPSETOTHERMODE_handler alignment broken"
 .endif
     j       G_RDP_handler  // Send the command to the RDP
