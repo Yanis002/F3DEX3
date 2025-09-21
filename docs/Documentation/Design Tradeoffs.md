@@ -19,9 +19,9 @@ occlusion plane for all vertices.
 
 ## Functionality in Overlay 3
 
-The following commands are moved to Overlay 3 in F3DEX3 to save IMEM space. This
-means that code will have to be loaded from DRAM to run them if Overlays 2 or 4
-(for lighting) happen to be loaded already.
+The following commands are moved to Overlay 2 or 3 in F3DEX3 to save IMEM space.
+This means that code will have to be loaded from DRAM to run them if a different
+overlay happens to be loaded already.
 - Push and multiply codepaths for `SPMatrix`
 - `SPPopMatrix*`
 - `SPDma*`
@@ -32,7 +32,8 @@ However:
   or accuracy, and these are not used for most 3D objects in SM64 or OoT.
 - `SPDma*` is rarely used except at startup for HLE detection.
 - `SPMemset` is a new F3DEX3 command which can improve performance. Plus, it is
-  typically run shortly after render start, when Overlay 3 is already in IMEM.
+  typically run shortly after render start, when Overlay 3 (which contains it)
+  is already in IMEM.
 
 So there is not a significant practical performance impact from these changes.
 
@@ -117,10 +118,10 @@ segment 0 must always be 0x00000000 so that this address resolves to e.g.
 In F3DEX2, the RSP time for drawing non-textured tris was significantly lower
 than for textured tris, by skipping a chunk of computation for the texture
 coefficients if they were disabled. In F3DEX3, no computation is skipped when
-textures are disabled. However, almost all materials use textures, and F3DEX3 is
-a little faster at drawing textured tris than F3DEX2. Plus, F3DEX3 still does
-not send the texture cofficients if they are disabled, saving DRAM access time
-for RSP -> FIFO and FIFO -> RDP. RDP time savings from avoiding loading a
+textures are disabled. However, practically almost all materials use textures,
+and F3DEX3 is faster at drawing textured tris than F3DEX2. Plus, F3DEX3 still
+does not send the texture cofficients if they are disabled, saving DRAM access
+time for RSP -> FIFO and FIFO -> RDP. RDP time savings from avoiding loading a
 texture are unaffected of course. 
 
 ## Obscure semantic differences from F3DEX2 that should never matter in practice
@@ -134,3 +135,6 @@ texture are unaffected of course.
   to hold state during some display list macros which are actually two 8-byte
   commands. This change is not noticeable when using standard GBI commands, only
   if something highly custom has been set up.
+- `SPTexture` and `SPFogFactor` state is corrupted when loading and returning
+  from another microcode (S2DEX). In F3DEX2, it would be reinitialized to
+  default values; in F3DEX3, it is left as garbage values.

@@ -254,12 +254,16 @@ otherMode0: // command byte included, same as above
 otherMode1:
     .dw 0x00000000
 
-unused4:
-    .fill 8
-
-unused3:
-    .fill 4
+// These two words are texrectState in S2DEX, so it can clobber them.
+textureSettings1:
+    .dw 0x00000000 // first word, has command byte, level, tile, and on
+textureSettings2:
+    .dw 0xFFFFFFFF // second word, has s and t scale
     
+// This word is rdpHalf1Val in S2DEX, so it can clobber it.
+fogFactor:
+    .dw 0x00000000
+
 activeClipPlanes:
     .dh CLIP_SCAL_NPXY | CLIP_CAMPLANE  // Normal tri write, set to zero when clipping
     
@@ -477,25 +481,6 @@ materialCullMode:
 geometryModeLabel:
     .dw 0x00000000
 
-.if (. & 7) != 0
-    .error "textureSettings align to 8 broken"
-.endif
-
-textureSettings1:
-    .dw 0x00000000 // first word, has command byte, level, tile, and on
-    
-textureSettings2:
-    .dw 0xFFFFFFFF // second word, has s and t scale
-    
-fogFactor:
-    .dw 0x00000000
-
-// First half of RDP value for split commands. Also used as temp storage for
-// tri vertices during tri commands.
-rdpHalf1Val:
-    .fill 4
-
-// moveword table
 movewordTable:
     .dh fxParams           // G_MW_FX
     .dh numLightsxSize - 3 // G_MW_NUMLIGHT; writes numLightsxSize and pointLightFlag, zeroes dirLightsXfrmValid
@@ -511,7 +496,11 @@ packedNormalsConstants:
     .dh fogFactor          // G_MW_FOG
     .dh lightBufferMain    // G_MW_LIGHTCOL
 
-// Movemem table
+// First half of RDP value for split commands. Also used as temp storage for
+// tri vertices during tri commands.
+rdpHalf1Val:
+    .fill 4
+
 movememTable:
     .dh mMatrix         // G_MV_MMTX
     .dh tempMatrix      // G_MV_TEMPMTX0 multiply temp matrix (model)
@@ -519,7 +508,7 @@ movememTable:
     .dh tempMatrix      // G_MV_TEMPMTX1 multiply temp matrix (view*projection)
     .dh viewport        // G_MV_VIEWPORT
     .dh cameraWorldPos  // G_MV_LIGHT
-
+    
 afterMovememRaTable:
     .dh run_next_DL_command
     .dh G_MTX_multiply_end
@@ -1124,34 +1113,6 @@ start_padded_end:
 .orga max(orga(), max(ovl0_padded_end - ovl0_start, ovl1_padded_end - ovl1_start) - 0x80)
 ovl01_end:
 
-G_CULLDL_handler: // 15
-    lhu     $10, (vertexTable)(cmd_w0)      // Start vtx addr
-    lhu     $3, (vertexTable)(cmd_w1_dram)  // End vertex
-    /*
-    CLIP_OCCLUDED can't be included here because: Suppose the list consists of N-1
-    verts which are behind the occlusion plane, and 1 vert which is behind the camera
-    plane and therefore randomly erroneously also set as behind the occlusion plane.
-    However, the convex hull of all the verts goes through visible area. This will be
-    incorrectly culled here. We can't afford the extra few instructions to disable
-    the occlusion plane if the vert is behind the camera, because this only matters for
-    G_CULLDL and not for tris.
-    */
-    li      $1, (CLIP_SCRN_NPXY | CLIP_CAMPLANE)
-    lhu     $11, VTX_CLIP($10)
-culldl_loop:
-    and     $1, $1, $11
-    beqz    $1, run_next_DL_command         // Some vertex is on the screen-side of all clipping planes; have to render
-     lhu    $11, (vtxSize + VTX_CLIP)($10)  // next vertex clip flags
-    bne     $10, $3, culldl_loop            // loop until reaching the last vertex
-     addi   $10, $10, vtxSize               // advance to the next vertex
-    li      cmd_w0, 0                       // Clear count of DL cmds to skip loading
-G_ENDDL_handler:
-    lbu     $1, displayListStackLength      // Load the DL stack index; if end stack,
-    beqz    $1, load_overlay_0_and_enter    // load overlay 0; $1 < 0 signals end
-     addi   $1, $1, -4                      // Decrement the DL stack index
-    j       call_ret_common                 // has a different version in ovl1
-     lw     taskDataPtr, (displayListStack)($1) // Load addr of DL to return to
-
 G_POPMTX_handler:
 G_DMA_IO_handler:
     j       ovl234_ltbasic_entrypoint   // Delay slot is harmless
@@ -1195,6 +1156,23 @@ displaylist_dma_tri_snake:
 dma_and_wait_goto_next_ra:
     j       dma_read_write
      li     $ra, wait_goto_next_ra
+
+G_SETxIMG_handler: // 12
+    lb      $3, materialCullMode            // Get current mode
+    jal     segmented_to_physical           // Convert image to physical address
+     lw     $2, lastMatDLPhyAddr            // Get last material physical addr
+    bnez    $3, send_w0_w1_to_rdp           // If not in normal mode (0), exit
+     add    $10, taskDataPtr, inputBufferPos // Current material physical addr
+    beq     $10, $2, @@skip                 // Branch if we are executing the same mat again
+     sw     $10, lastMatDLPhyAddr           // Store material physical addr
+    li      $7, 1                           // > 0: in material first time
+@@skip:                                     // Otherwise $7 was < 0: cull mode (in mat second time)
+    sb      $7, materialCullMode
+send_w0_w1_to_rdp:
+    sw      cmd_w0, 0(rdpCmdBufPtr)
+send_w1_to_rdp:
+    j       commit_small_rdp_command
+     sw     cmd_w1_dram, 4(rdpCmdBufPtr)
 
 G_MEMSET_handler:
     j       ovl234_clipmisc_entrypoint       // Delay slot is harmless
@@ -1252,37 +1230,33 @@ run_next_DL_command:
     // $7 must retain the command byte for load_mtx and overlay 3 stuff
     // $ra must contain the handler called for several handlers
 
-/* This is a crazy optimization, and it was completely accidental!
-When G_RELSEGMENT was implemented, we did not notice the G_MOVEWORD behavior of
-subtracting (G_MOVEWORD << 8) from the movewordTable address in order to remove
-the command byte. Since the command byte is G_RELSEGMENT, not G_MOVEWORD, the
-final address is completely wrong. However, DMEM wraps at 4 KiB--only the lowest
-4 bits of any address are significant. And, G_RELSEGMENT **happened** to end in
-0xB, the same as G_MOVEWORD! So the wrong address aliases to the correct one!
-I only noticed this when I tried to move G_RELSEGMENT to a different command
-byte and got crashes. */
-.if (G_RELSEGMENT & 0xF) != (G_MOVEWORD & 0xF)
-.error "Crazy relsegment optimization broken, don't change command byte assignments"
-.endif
-G_RELSEGMENT_handler: // 9
-    jal     segmented_to_physical    // Resolve new segment address relative to existing segment
-G_MOVEWORD_handler:
-     srl    $2, cmd_w0, 16           // load the moveword command and word index into $2 (e.g. 0xDB06 for G_MW_SEGMENT)
-    lhu     $10, (movewordTable - ((G_MOVEWORD & 0xF) << 8))($2) // subtract the moveword label and offset the word table by the word index (e.g. 0xDB06 becomes 0x0304)
-do_moveword:
-    sll     $11, cmd_w0, 16          // Sign bit = upper bit of offset
-    add     $10, $10, cmd_w0         // Offset + base; only lower 12 bits matter
-    bltz    $11, run_next_DL_command // If upper bit of offset is set, exit after halfword
-     sh     cmd_w1_dram, ($10)       // Store value from cmd into halfword
-    j       run_next_DL_command
-     sw     cmd_w1_dram, ($10)       // Store value from cmd into word (offset + moveword_table[index])
-
 G_LOAD_UCODE_handler: // 4
     j       load_overlay_0_and_enter     // Delay slot is harmless
 G_MODIFYVTX_handler:
      lhu    $10, (vertexTable)(cmd_w0)   // Byte 3 = vtx being modified
     j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
      lbu    cmd_w0, (inputBufferEnd - 0x07)(inputBufferPos)  // offset in vtx, bit 15 clear
+
+G_MTX_handler: // 12
+.if CFG_PROFILING_C
+    addi    perfCounterC, perfCounterC, 1  // Increment matrix count
+.endif
+    andi    $11, cmd_w0, G_MTX_VP_M | G_MTX_NOPUSH_PUSH
+    beqz    $11, ovl234_ltbasic_entrypoint   // Model and push: go to overlay for push
+     sh     $zero, mvpValid                  // Also zeroes dirLightsXfrmValid
+load_mtx:
+    andi    $1, cmd_w0, G_MTX_MUL_LOAD       // Read the matrix load type into $1 (2 is multiply, 0 is load)
+G_MOVEMEM_handler:  // Otherwise $1 is 0
+    jal     segmented_to_physical   // convert the memory address cmd_w1_dram to a virtual one
+do_movemem:
+     // 0: load M, 2: mul M -> load temp, 4: load VP, 6: mul VP -> load temp
+     andi   $3, cmd_w0, 0x00FE            // Movemem table index into $1 (bits 1-7 of the word 0)
+    lbu     dmaLen, (inputBufferEnd - 0x07)(inputBufferPos) // Second byte of word 0
+    lhu     dmemAddr, (movememTable)($3)  // $3 reused in G_MTX_multiply_end
+    srl     $2, cmd_w0, 5                 // ((w0) >> 8) << 3; top 3 bits of idx must be 0; lower 1 bit of len byte must be 0
+    add     dmemAddr, dmemAddr, $2
+    j       dma_and_wait_goto_next_ra
+     lh     nextRA, (afterMovememRaTable)($1) // $1 is 2 if mtx multiply, else 0
 
 .if !ENABLE_PROFILING
 G_LIGHTTORDP_handler: // 9
@@ -2200,11 +2174,11 @@ vtx_constants_for_clip:
     // Sets up constants needed for vertex loop, including during clipping.
     // Results fill vPerm1:4. Uses misc temps.
 .if CFG_NO_OCCLUSION_PLANE
-    llv     sFOG[0], (fogFactor - altBase)(altBaseReg) // Load fog multiplier 0 and offset 1
+    llv     sFOG[0], (fogFactor)($zero)           // Load fog multiplier 0 and offset 1
     ldv     sVPO[0], (viewport + 8)($zero)        // Load vtrans duplicated in 0-3 and 4-7
     veq     $v29, $v31, $v31[3h]                  // VCC = 00010001
     ldv     sVPO[8], (viewport + 8)($zero)
-    llv     sSTS[0], (textureSettings2 - altBase)(altBaseReg) // Texture ST scale in 0, 1
+    llv     sSTS[0], (textureSettings2)($zero)    // Texture ST scale in 0, 1
     vmrg    sFGM, vOne, $v31[2]                   // sFGM is 0,0,0,1,0,0,0,1
     ldv     sVPS[0], (viewport)($zero)            // Load vscale duplicated in 0-3 and 4-7
     vne     $v29, $v31, $v31[3h]                  // VCC = 11101110
@@ -2222,7 +2196,7 @@ vtx_constants_for_clip:
 .else
     lb      flagsV1, geometryModeLabel + 3    // G_ATTROFFSET_ST_ENABLE in sign bit
     lw      $11, (fogFactor)($zero)           // Load fog multiplier MSBs and offset LSBs
-    llv     sSTS[0], (textureSettings2 - altBase)(altBaseReg) // Texture ST scale in 0, 1
+    llv     sSTS[0], (textureSettings2)($zero) // Texture ST scale in 0, 1
     llv     $v30[0], (attrOffsetST - altBase)(altBaseReg)  // Texture ST offset in 0, 1
     llv     $v30[8], (attrOffsetST - altBase)(altBaseReg)  // Texture ST offset in 4, 5
     bltz    flagsV1, @@keepoffset
@@ -2857,26 +2831,76 @@ ovl0_padded_end:
 
 ovl1_start:
 
-G_MTX_handler: // 12
-.if CFG_PROFILING_C
-    addi    perfCounterC, perfCounterC, 1  // Increment matrix count
+G_CULLDL_handler: // 15
+    lhu     $10, (vertexTable)(cmd_w0)      // Start vtx addr
+    lhu     $3, (vertexTable)(cmd_w1_dram)  // End vertex
+    /*
+    CLIP_OCCLUDED can't be included here because: Suppose the list consists of N-1
+    verts which are behind the occlusion plane, and 1 vert which is behind the camera
+    plane and therefore randomly erroneously also set as behind the occlusion plane.
+    However, the convex hull of all the verts goes through visible area. This will be
+    incorrectly culled here. We can't afford the extra few instructions to disable
+    the occlusion plane if the vert is behind the camera, because this only matters for
+    G_CULLDL and not for tris.
+    */
+    li      $1, (CLIP_SCRN_NPXY | CLIP_CAMPLANE)
+    lhu     $11, VTX_CLIP($10)
+culldl_loop:
+    and     $1, $1, $11
+    beqz    $1, run_next_DL_command         // Some vertex is on the screen-side of all clipping planes; have to render
+     lhu    $11, (vtxSize + VTX_CLIP)($10)  // next vertex clip flags
+    bne     $10, $3, culldl_loop            // loop until reaching the last vertex
+     addi   $10, $10, vtxSize               // advance to the next vertex
+    li      cmd_w0, 0                       // Clear count of DL cmds to skip loading
+G_ENDDL_handler:
+    lbu     $1, displayListStackLength      // Load the DL stack index; if end stack,
+    beqz    $1, load_overlay_0_and_enter    // load overlay 0; $1 < 0 signals end
+     addi   $1, $1, -4                      // Decrement the DL stack index
+    j       call_ret_common                 // has a different version in ovl1
+     lw     taskDataPtr, (displayListStack)($1) // Load addr of DL to return to
+
+G_SETSCISSOR_handler: // 3; should be towards the start of ovl1
+    li      $ra, scissorUpLeft - (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))
+G_RDPSETOTHERMODE_handler: // $ra = .
+.if (. & 7) != 0
+    .error "G_RDPSETOTHERMODE_handler alignment broken"
 .endif
-    andi    $11, cmd_w0, G_MTX_VP_M | G_MTX_NOPUSH_PUSH
-    beqz    $11, ovl234_ltbasic_entrypoint   // Model and push: go to overlay for push
-     sh     $zero, mvpValid                  // Also zeroes dirLightsXfrmValid
-load_mtx:
-    andi    $1, cmd_w0, G_MTX_MUL_LOAD       // Read the matrix load type into $1 (2 is multiply, 0 is load)
-G_MOVEMEM_handler:  // Otherwise $1 is 0
-    jal     segmented_to_physical   // convert the memory address cmd_w1_dram to a virtual one
-do_movemem:
-     // 0: load M, 2: mul M -> load temp, 4: load VP, 6: mul VP -> load temp
-     andi   $3, cmd_w0, 0x00FE            // Movemem table index into $1 (bits 1-7 of the word 0)
-    lbu     dmaLen, (inputBufferEnd - 0x07)(inputBufferPos) // Second byte of word 0
-    lhu     dmemAddr, (movememTable)($3)  // $3 reused in G_MTX_multiply_end
-    srl     $2, cmd_w0, 5                 // ((w0) >> 8) << 3; top 3 bits of idx must be 0; lower 1 bit of len byte must be 0
-    add     dmemAddr, dmemAddr, $2
-    j       dma_and_wait_goto_next_ra
-     lh     nextRA, (afterMovememRaTable)($1) // $1 is 2 if mtx multiply, else 0
+    j       G_RDP_handler  // Send the command to the RDP
+     spv    $v4[0], (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))($ra)
+
+/* This is a crazy optimization, and it was completely accidental!
+When G_RELSEGMENT was implemented, we did not notice the G_MOVEWORD behavior of
+subtracting (G_MOVEWORD << 8) from the movewordTable address in order to remove
+the command byte. Since the command byte is G_RELSEGMENT, not G_MOVEWORD, the
+final address is completely wrong. However, DMEM wraps at 4 KiB--only the lowest
+4 bits of any address are significant. And, G_RELSEGMENT **happened** to end in
+0xB, the same as G_MOVEWORD! So the wrong address aliases to the correct one!
+I only noticed this when I tried to move G_RELSEGMENT to a different command
+byte and got crashes. */
+.if (G_RELSEGMENT & 0xF) != (G_MOVEWORD & 0xF)
+.error "Crazy relsegment optimization broken, don't change command byte assignments"
+.endif
+G_RELSEGMENT_handler: // 9
+    jal     segmented_to_physical    // Resolve new segment address relative to existing segment
+G_MOVEWORD_handler:
+     srl    $2, cmd_w0, 16           // load the moveword command and word index into $2 (e.g. 0xDB06 for G_MW_SEGMENT)
+    lhu     $10, (movewordTable - ((G_MOVEWORD & 0xF) << 8))($2) // subtract the moveword label and offset the word table by the word index (e.g. 0xDB06 becomes 0x0304)
+do_moveword:
+    sll     $11, cmd_w0, 16          // Sign bit = upper bit of offset
+    add     $10, $10, cmd_w0         // Offset + base; only lower 12 bits matter
+    bltz    $11, run_next_DL_command // If upper bit of offset is set, exit after halfword
+     sh     cmd_w1_dram, ($10)       // Store value from cmd into halfword
+    j       run_next_DL_command
+     sw     cmd_w1_dram, ($10)       // Store value from cmd into word (offset + moveword_table[index])
+
+G_TEXRECT_handler: // 3; should be towards the start of ovl1
+    li      $ra, texrectState - (textureSettings1 - (G_TEXTURE_handler & 0xFFF))
+G_TEXTURE_handler: // $ra = .
+.if (. & 7) != 0
+    .error "G_TEXTURE_handler alignment broken"
+.endif
+    j       run_next_DL_command
+     spv    $v4[0], (textureSettings1 - (G_TEXTURE_handler & 0xFFF))($ra)
 
 G_FLUSH_handler: // 32
     jal     flush_rdp_buffer        // Flush once to push partial DMEM buf to FIFO
@@ -2957,20 +2981,7 @@ G_RDPHALF_1_handler: // $ra = ., 0x10 ahead of geometry mode
     j       run_next_DL_command
      sw     cmd_w1_dram, (geometryModeLabel - G_GEOMETRYMODE_handler)($ra)
 
-.if !CFG_PROFILING_C
-    nop // TODO
-.endif
-
-G_TEXRECT_handler:
-    li      $ra, texrectState - (textureSettings1 - (G_TEXTURE_handler & 0xFFF))
-G_TEXTURE_handler: // $ra = .
-.if (. & 7) != 0
-    .error "G_TEXTURE_handler alignment broken"
-.endif
-    j       run_next_DL_command
-     spv    $v4[0], (textureSettings1 - (G_TEXTURE_handler & 0xFFF))($ra)
-
-G_RDPHALF_2_handler: // 8
+G_RDPHALF_2_handler: // 8; should be after the handlers with alignment needs
     li      $11, texrectState
     ldv     $v29[0], (0)($11)
     sb      $zero, materialCullMode         // This covers tex and fill rects
@@ -2978,39 +2989,9 @@ G_RDPHALF_2_handler: // 8
     addi    rdpCmdBufPtr, rdpCmdBufPtr, 8
 .if !ENABLE_PROFILING
     addi    perfCounterB, perfCounterB, 1   // Increment number of tex/fill rects
-.else
-    vnop // For G_RDPSETOTHERMODE_handler alignment below, without taking a cycle
 .endif
     j       send_w0_w1_to_rdp               // w1 is from the current command
      sdv    $v29[0], -8(rdpCmdBufPtr)
-
-    nop // TODO
-
-G_SETSCISSOR_handler:
-    li      $ra, scissorUpLeft - (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))
-G_RDPSETOTHERMODE_handler: // $ra = .
-.if (. & 7) != 0
-    .error "G_RDPSETOTHERMODE_handler alignment broken"
-.endif
-    j       G_RDP_handler  // Send the command to the RDP
-     spv    $v4[0], (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))($ra)
-
-G_SETxIMG_handler: // 12
-    lb      $3, materialCullMode            // Get current mode
-    jal     segmented_to_physical           // Convert image to physical address
-     lw     $2, lastMatDLPhyAddr            // Get last material physical addr
-    bnez    $3, send_w0_w1_to_rdp           // If not in normal mode (0), exit
-     add    $10, taskDataPtr, inputBufferPos // Current material physical addr
-    beq     $10, $2, @@skip                 // Branch if we are executing the same mat again
-     sw     $10, lastMatDLPhyAddr           // Store material physical addr
-    li      $7, 1                           // > 0: in material first time
-@@skip:                                     // Otherwise $7 was < 0: cull mode (in mat second time)
-    sb      $7, materialCullMode
-send_w0_w1_to_rdp:
-    sw      cmd_w0, 0(rdpCmdBufPtr)
-send_w1_to_rdp:
-    j       commit_small_rdp_command
-     sw     cmd_w1_dram, 4(rdpCmdBufPtr)
 
 ovl1_end:
 align_with_warning 8, "One instruction of padding at end of ovl1"
