@@ -1033,21 +1033,23 @@ start: // This is at IMEM 0x1080, not the start of IMEM
     li      rdpCmdBufPtr, rdpCmdBuffer1
     vclr    vOne
     li      rdpCmdBufEndP1, rdpCmdBuffer1EndPlus1Word
+    li      nextRA, displaylist_dma
     lw      $11, rdpFifoPos
-    lw      $10, OSTask + OSTask_flags
+    lw      $2, OSTask + OSTask_flags
     li      $1, SP_CLR_SIG2 | SP_CLR_SIG1   // Clear task done and yielded signals
     vsub    vOne, vOne, $v31[1]             // 1 = 0 - -1
     beqz    $11, initialize_rdp             // If RDP FIFO not set up yet, starting ucode from scratch
      mtc0   $1, SP_STATUS
-    andi    $10, $10, OS_TASK_YIELDED       // Resumed from yield or came from called ucode?
-    beqz    $10, continue_from_os_task      // If latter, load DL (task data) pointer from OSTask
+    andi    $2, $2, OS_TASK_YIELDED         // Resumed from yield or came from called ucode?
+    beqz    $2, continue_from_os_task       // If latter, load DL (task data) pointer from OSTask
      // Otherwise continuing from yield; perf counters saved here at yield
      lw     perfCounterA, yieldDataFooter + YDF_OFFSET_PERFCOUNTERA
     lw      perfCounterB, yieldDataFooter + YDF_OFFSET_PERFCOUNTERB
     lw      perfCounterC, yieldDataFooter + YDF_OFFSET_PERFCOUNTERC
     lw      perfCounterD, yieldDataFooter + YDF_OFFSET_PERFCOUNTERD
+    lw      taskDataPtr, yieldDataFooter + YDF_OFFSET_TASKDATAPTR
     j       finish_setup
-     lw     taskDataPtr, yieldDataFooter + YDF_OFFSET_TASKDATAPTR
+     li     nextRA, displaylist_dma_from_yield
 
 initialize_rdp:
     mfc0    $11, DPC_STATUS               // Read RDP status
@@ -1102,9 +1104,8 @@ finish_setup:
     sh      $zero, mvpValid  // and dirLightsXfrmValid
     lhu     vGeomMid, geometryModeLabel + 1
     li      inputBufferPos, 0
-    li      cmd_w1_dram, orga(ovl1_start)
     j       load_overlays_0_1
-     li     nextRA, displaylist_dma
+     li     cmd_w1_dram, orga(ovl1_start)
 
 start_end:
 .align 8
@@ -1142,21 +1143,42 @@ call_ret_common:
     andi    inputBufferPos, cmd_w0, 0x00F8             // Byte 3, how many cmds to drop from load (max 0xA0)
 displaylist_dma:
     li      nextRA, run_next_DL_command
-displaylist_dma_tri_snake:
+displaylist_dma_goto_next_ra:
     // Load INPUT_BUFFER_SIZE_BYTES - inputBufferPos cmds (inputBufferPos >= 0, mult of 8)
     addi    inputBufferPos, inputBufferPos, -INPUT_BUFFER_SIZE_BYTES // inputBufferPos = - num cmds
+    nor     dmaLen, inputBufferPos, $zero              // DMA length = -inputBufferPos - 1 = ones compliment
+    move    cmd_w1_dram, taskDataPtr                   // set up the DRAM address to read from
+    jal     dma_read_write
+     addi   dmemAddr, inputBufferPos, inputBufferEnd   // set the address to DMA read to
+    mfc0    $1, SP_STATUS                              // load the status word into register $1
+    sub     taskDataPtr, taskDataPtr, inputBufferPos   // increment the DRAM address to read from next time
 .if CFG_PROFILING_A
     sll     $11, inputBufferPos, 16 - 3                // Divide by 8 for num cmds to load, then move to upper 16
     sub     perfCounterB, perfCounterB, $11            // Negative so subtract
 .endif
-    nor     dmaLen, inputBufferPos, $zero              // DMA length = -inputBufferPos - 1 = ones compliment
-    move    cmd_w1_dram, taskDataPtr                   // set up the DRAM address to read from
-    sub     taskDataPtr, taskDataPtr, inputBufferPos   // increment the DRAM address to read from next time
-    addi    dmemAddr, inputBufferPos, inputBufferEnd   // set the address to DMA read to
+    andi    $1, $1, SP_STATUS_SIG0                     // check if the task should yield
+    beqz    $1, wait_goto_next_ra                      // if not, continue normal processing
+     sh     nextRA, tempTriRA                          // Save address to come back to after yield
+load_overlay_0_and_enter:
+    li      nextRA, 0x1000                  // Sets up return address
+    li      cmd_w1_dram, orga(ovl0_start)   // Sets up ovl0 table address
+load_overlays_0_1:
+    li      dmaLen, ovl01_end - 0x1000 - 1
+    j       load_overlay_inner
+     li     dmemAddr, 0x1000
 
-dma_and_wait_goto_next_ra:
-    j       dma_read_write
-     li     $ra, wait_goto_next_ra
+G_LOAD_UCODE_handler: // 2
+    j       load_overlay_0_and_enter
+     li     $1, 0 // TODO
+    
+displaylist_dma_from_yield:
+    j       displaylist_dma_goto_next_ra
+     lh     nextRA, tempTriRA
+
+G_MODIFYVTX_handler: // 3
+    lhu     $10, (vertexTable)(cmd_w0)   // Byte 3 = vtx being modified
+    j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
+     lbu    cmd_w0, (inputBufferEnd - 0x07)(inputBufferPos)  // offset in vtx, bit 15 clear
 
 G_SETxIMG_handler: // 12
     lb      $3, materialCullMode            // Get current mode
@@ -1199,10 +1221,6 @@ G_LIGHTTORDP_handler:
 .endif
 G_SPNOOP_handler:
 run_next_DL_command:
-    // TODO
-     mfc0   $1, SP_STATUS                               // load the status word into register $1
-    andi    $1, $1, SP_STATUS_SIG0                      // check if the task should yield
-    bnez    $1, load_overlay_0_and_enter                // load and execute overlay 0 if yielding; $1 > 0
      lb     $7, (inputBufferEnd)(inputBufferPos)        // Command byte
     lpv     $v4[0], (inputBufferEndSgn)(inputBufferPos) // Whole command
     beqz    inputBufferPos, displaylist_dma             // Check if buffer is empty
@@ -1231,13 +1249,6 @@ run_next_DL_command:
     // $7 must retain the command byte for load_mtx and command dispatch in overlays 2 and 3
     // $ra must contain the handler called for several handlers
 
-G_LOAD_UCODE_handler: // 4
-    j       load_overlay_0_and_enter     // Delay slot is harmless
-G_MODIFYVTX_handler:
-     lhu    $10, (vertexTable)(cmd_w0)   // Byte 3 = vtx being modified
-    j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
-     lbu    cmd_w0, (inputBufferEnd - 0x07)(inputBufferPos)  // offset in vtx, bit 15 clear
-
 G_MTX_handler: // 12
 .if CFG_PROFILING_C
     addi    perfCounterC, perfCounterC, 1  // Increment matrix count
@@ -1257,8 +1268,10 @@ do_movemem: // Coming from popmtx; $7 was set to (-0x100 | G_MOVEMEM)
     lhu     dmemAddr, (movememTable)($3)  // $3 reused in G_MTX_multiply_end
     srl     $2, cmd_w0, 5                 // ((w0) >> 8) << 3; top 3 bits of idx must be 0; lower 1 bit of len byte must be 0
     add     dmemAddr, dmemAddr, $2
-    j       dma_and_wait_goto_next_ra
-     lh     nextRA, (afterMovememRaTable - (-0x100 | G_MOVEMEM))($7)
+    lh      nextRA, (afterMovememRaTable - (-0x100 | G_MOVEMEM))($7)
+dma_and_wait_goto_next_ra:
+    j       dma_read_write
+     li     $ra, wait_goto_next_ra
 
 .if !ENABLE_PROFILING
 G_LIGHTTORDP_handler: // 9
@@ -1774,7 +1787,7 @@ return_and_end_mat:
      sb     $zero, materialCullMode // This covers all tri early exits except clipping
 
 tri_snake_over_input_buffer:
-    bgez    $3, displaylist_dma_tri_snake // If $3 < 0, last tri flag set, proceed to end
+    bgez    $3, displaylist_dma_goto_next_ra // If $3 < 0, last tri flag set, proceed to end
      li     nextRA, tri_snake_ret_from_input_buffer // inputBufferPos is now 0; load whole buffer
 tri_snake_end:
     addi    inputBufferPos, inputBufferPos, 7 // Round up to whole input command
@@ -2635,13 +2648,14 @@ tris_end:
      lqv    vTRC, (vTRCValue)($zero)         // Restore value overwritten by matrix
 .endif
 
-load_overlay_0_and_enter:
-    li      nextRA, 0x1000                  // Sets up return address
-    li      cmd_w1_dram, orga(ovl0_start)   // Sets up ovl0 table address
-load_overlays_0_1:
-    li      dmaLen, ovl01_end - 0x1000 - 1
-    j       load_overlay_inner
-     li     dmemAddr, 0x1000
+.if 0
+dump_dmem:
+    jal     segmented_to_physical
+     lw     cmd_w1_dram, dumpDmemBuffer
+    li      dmemAddr, 0x8000 // address 0, negative = write
+    j       dma_and_wait_goto_next_ra
+     li     dmaLen, 0x1000 - 1 // all of DMEM, DMA lengths always minus 1
+.endif
 
 load_overlays_2_3_4:
     addi    nextRA, $ra, -8  // Got here with jal, but want to return to addr of jal itself
@@ -2679,15 +2693,6 @@ dma_read_write:
      addi   perfCounterD, perfCounterD, 6  // 3 instr + 2 after mfc + 1 taken branch
     j       dma_read_write_not_full
      nop
-.endif
-
-.if 0
-dump_dmem:
-    jal     segmented_to_physical
-     lw     cmd_w1_dram, dumpDmemBuffer
-    li      dmemAddr, 0x8000 // address 0, negative = write
-    j       dma_and_wait_goto_next_ra
-     li     dmaLen, 0x1000 - 1 // all of DMEM, DMA lengths always minus 1
 .endif
 
 endFreeImemAddr equ 0x1FC4
