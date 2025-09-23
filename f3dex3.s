@@ -1130,17 +1130,17 @@ G_BRANCH_WZ_handler:
     li      cmd_w0, -0x8000             // Bit 16 set (via negative) = nopush, bits 3-7 = 0 for hint
 G_DL_handler:
     sll     $2, cmd_w0, 15                  // Shifts the push/nopush value to the sign bit
-    lbu     $1, displayListStackLength      // Get the DL stack length
+    lbu     $7, displayListStackLength      // Get the DL stack length
     jal     segmented_to_physical
      add    $3, taskDataPtr, inputBufferPos // Current DL pos to push on stack
     bltz    $2, call_ret_common             // Nopush = branch = flag is set
      move   taskDataPtr, cmd_w1_dram        // Set the new DL to the target display list
-    sw      $3, (displayListStack)($1)
-    addi    $1, $1, 4                       // Increment the DL stack length
+    sw      $3, (displayListStack)($7)
+    addi    $7, $7, 4                       // Increment the DL stack length
 call_ret_common:
     sb      $zero, materialCullMode         // This covers call, branch, return, and cull and branchZ successes
-    sb      $1, displayListStackLength
-    andi    inputBufferPos, cmd_w0, 0x00F8             // Byte 3, how many cmds to drop from load (max 0xA0)
+    sb      $7, displayListStackLength
+    andi    inputBufferPos, cmd_w0, 0x00F8  // Byte 3, how many cmds to drop from load (max 0xA0)
 displaylist_dma:
     li      nextRA, run_next_DL_command
 displaylist_dma_goto_next_ra:
@@ -1150,15 +1150,16 @@ displaylist_dma_goto_next_ra:
     move    cmd_w1_dram, taskDataPtr                   // set up the DRAM address to read from
     jal     dma_read_write
      addi   dmemAddr, inputBufferPos, inputBufferEnd   // set the address to DMA read to
-    mfc0    $1, SP_STATUS                              // load the status word into register $1
+    mfc0    $7, SP_STATUS                              // load the status word into register $1
     sub     taskDataPtr, taskDataPtr, inputBufferPos   // increment the DRAM address to read from next time
 .if CFG_PROFILING_A
     sll     $11, inputBufferPos, 16 - 3                // Divide by 8 for num cmds to load, then move to upper 16
     sub     perfCounterB, perfCounterB, $11            // Negative so subtract
 .endif
-    andi    $1, $1, SP_STATUS_SIG0                     // check if the task should yield
-    beqz    $1, wait_goto_next_ra                      // if not, continue normal processing
+    andi    $7, $7, SP_STATUS_SIG0                     // check if the task should yield
+    beqz    $7, wait_goto_next_ra                      // if not, continue normal processing
      sh     nextRA, tempTriRA                          // Save address to come back to after yield
+G_LOAD_UCODE_handler: // If jumped here, $7 = G_LOAD_UCODE
 load_overlay_0_and_enter:
     li      nextRA, 0x1000                  // Sets up return address
     li      cmd_w1_dram, orga(ovl0_start)   // Sets up ovl0 table address
@@ -1167,10 +1168,6 @@ load_overlays_0_1:
     j       load_overlay_inner
      li     dmemAddr, 0x1000
 
-G_LOAD_UCODE_handler: // 2
-    j       load_overlay_0_and_enter
-     li     $1, 0 // TODO
-    
 displaylist_dma_from_yield:
     j       displaylist_dma_goto_next_ra
      lh     nextRA, tempTriRA
@@ -1263,7 +1260,7 @@ G_MOVEMEM_handler: // If called this handler, $7 = (-0x100 | G_MOVEMEM)
     jal     segmented_to_physical   // convert the memory address cmd_w1_dram to a virtual one
 do_movemem: // Coming from popmtx; $7 was set to (-0x100 | G_MOVEMEM)
      // 0: load M, 2: mul M -> load temp, 4: load VP, 6: mul VP -> load temp
-     andi   $3, cmd_w0, 0x00FE            // Movemem table index into $1 (bits 1-7 of the word 0)
+     andi   $3, cmd_w0, 0x00FE            // Movemem table index into $3 (bits 1-7 of the word 0)
     lbu     dmaLen, (inputBufferEnd - 0x07)(inputBufferPos) // Second byte of word 0
     lhu     dmemAddr, (movememTable)($3)  // $3 reused in G_MTX_multiply_end
     srl     $2, cmd_w0, 5                 // ((w0) >> 8) << 3; top 3 bits of idx must be 0; lower 1 bit of len byte must be 0
@@ -1843,12 +1840,14 @@ ovl234_clipmisc_entrypoint:
 .endif
     bgez    $7, vtx_constants_for_clip     // $7 < 0: cmd byte. >= 0: vtx 2 clip flags with lhu.
      li     inVtx, -0x8000                 // inVtx < 0 means from clipping. Inc'd each vtx write by 2 * inputVtxSize, but this is large enough it should stay negative.
-.if !(G_MEMSET & 0x80)
+.if !(G_MEMSET & 0x80) || !(G_DMA_IO & 0x80)
     .error "Command handlers in ovl3 < 0 assumption broken"
 .endif
     lw      cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Overwritten by overlay load
-g_memset_ovl3:
-    llv     $v2[0], (rdpHalf1Val - altBase)(altBaseReg) // Load the memset value
+    li      $3, -0x100 | G_DMA_IO
+    beq     $3, $7, g_dma_io_ovl3
+g_memset_ovl3: // otherwise
+     llv    $v2[0], (rdpHalf1Val - altBase)(altBaseReg) // Load the memset value
     sll     cmd_w0, cmd_w0, 8           // Clear upper byte
     jal     segmented_to_physical
      srl    cmd_w0, cmd_w0, 8           // Number of bytes to memset (must be mult of 16)
@@ -1877,6 +1876,16 @@ g_memset_ovl3:
     jr      $ra
      addi   $2, $11, memsetBufferSize
     
+g_dma_io_ovl3:
+    jal     segmented_to_physical // Convert the provided segmented address (in cmd_w1_dram) to a virtual one
+     lh     dmemAddr, (inputBufferEnd - 0x07)(inputBufferPos) // Get the 16 bits in the middle of the command word (since inputBufferPos was already incremented for the next command)
+    andi    dmaLen, cmd_w0, 0x0FF8 // Mask out any bits in the length to ensure 8-byte alignment
+    li      nextRA, run_next_DL_command
+    j       dma_and_wait_goto_next_ra  // Trigger a DMA read or write, depending on the G_DMA_IO flag (which will occupy the sign bit of dmemAddr)
+     // At this point, dmemAddr's highest bit is the flag, it's next 13 bits are the DMEM address, and then it's last two bits are the upper 2 of size
+     // So an arithmetic shift right 2 will preserve the flag as being the sign bit and get rid of the 2 size bits, shifting the DMEM address to start at the LSbit
+     sra    dmemAddr, dmemAddr, 2
+
 // Each clip condition (clipping plane bit being checked) has three phases that
 // occur in this order: find an onscreen vertex, then find the transition from an
 // onscreen to offscreen vertex, then find the transition from an offscreen to an
@@ -2754,9 +2763,10 @@ dma_write:
 .headersize 0x00001000 - orga()
 
 // Overlay 0 handles three cases of stopping the current microcode.
-// The action here is controlled by $1. If yielding, $1 > 0. If this was
-// G_LOAD_UCODE, $1 == 0. If we got to the end of the parent DL, $1 < 0.
-// TODO
+// The action here is controlled by $7:
+// - If yielding, $7 == SP_STATUS_SIG0 == 0x0080
+// - If this was G_LOAD_UCODE, $7 == G_LOAD_UCODE == 0xDD (as negative)
+// - If we got to the end of the parent DL, $7 == -4.
 ovl0_start:
     jal     flush_rdp_buffer   // See G_FLUSH_handler for docs on these 3 instructions.
      sub    dmemAddr, rdpCmdBufPtr, rdpCmdBufEndP1
@@ -2768,7 +2778,8 @@ ovl0_start:
     sub     $11, $11, $10
     add     perfCounterA, perfCounterA, $11
 .endif
-    bnez    $1, task_done_or_yield  // Continue to load ucode if 0
+    addi    $7, $7, 4 // Now 0 if end, > 0 if yield, < 0 if load ucode
+    bgez    $7, task_done_or_yield  // Continue to load ucode if negative
 load_ucode:
      lw     cmd_w1_dram, (inputBufferEnd - 0x04)(inputBufferPos) // word 1 = ucode code DRAM addr
     sw      $zero, OSTask + OSTask_flags    // So next ucode knows it didn't come from yield
@@ -2802,9 +2813,9 @@ task_done_or_yield:
     sw      perfCounterA, yieldDataFooter + YDF_OFFSET_PERFCOUNTERA
     sw      perfCounterB, yieldDataFooter + YDF_OFFSET_PERFCOUNTERB
     sw      perfCounterC, yieldDataFooter + YDF_OFFSET_PERFCOUNTERC
-    bltz    $1, task_done           // $1 < 0 = Got to the end of the parent DL
+    beqz    $7, task_done           // see above
      sw     perfCounterD, yieldDataFooter + YDF_OFFSET_PERFCOUNTERD
-task_yield: // Otherwise $1 > 0 = CPU requested yield
+task_yield: // Otherwise CPU requested yield
     lw      $11, OSTask + OSTask_ucode         // Save pointer to current ucode
     lw      cmd_w1_dram, OSTask + OSTask_yield_data_ptr
     li      dmemAddr, -0x8000                  // 0, but negative = write
@@ -2864,11 +2875,11 @@ culldl_loop:
      addi   $10, $10, vtxSize               // advance to the next vertex
     li      cmd_w0, 0                       // Clear count of DL cmds to skip loading
 G_ENDDL_handler:
-    lbu     $1, displayListStackLength      // Load the DL stack index; if end stack,
-    beqz    $1, load_overlay_0_and_enter    // load overlay 0; $1 < 0 signals end
-     addi   $1, $1, -4                      // Decrement the DL stack index
+    lbu     $7, displayListStackLength      // Load the DL stack index; if end stack,
+    beqz    $7, load_overlay_0_and_enter    // load overlay 0; $7 == -4 signals end
+     addi   $7, $7, -4                      // Decrement the DL stack index
     j       call_ret_common                 // has a different version in ovl1
-     lw     taskDataPtr, (displayListStack)($1) // Load addr of DL to return to
+     lw     taskDataPtr, (displayListStack)($7) // Load addr of DL to return to
 
 G_SETSCISSOR_handler: // 3; should be towards the start of ovl1
     li      $ra, scissorUpLeft - (otherMode0 - (G_RDPSETOTHERMODE_handler & 0xFFF))
@@ -3423,14 +3434,12 @@ lLkDt1 equ lDOT    // lighting Lookat Dot product 1
      texgen_lastinstr lLkDt0, lLkDt1
 
 ltbasic_command_handlers:
-.if !(G_POPMTX & 0x80) || !(G_MTX & 0x80) || !(G_DMA_IO & 0x80)
+.if !(G_POPMTX & 0x80) || !(G_MTX & 0x80)
     .error "Command handlers in ovl2 < 0 assumption broken"
 .endif
     lw      cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Overwritten by overlay load
-    li      $11, -0x100 | G_MTX
-    beq     $11, $7, g_mtx_push_ovl2
-     li     $3, -0x100 | G_DMA_IO
-    beq     $3, $7, g_dma_io_ovl2
+    li      $3, -0x100 | G_MTX
+    beq     $3, $7, g_mtx_push_ovl2
 g_popmtx_ovl2:  // otherwise
      lw     $11, matrixStackPtr             // Current matrix stack pointer
     lw      $2, OSTask + OSTask_dram_stack  // Top of the stack
@@ -3453,17 +3462,6 @@ g_mtx_push_ovl2:
     sw      cmd_w1_dram, matrixStackPtr     // Update the matrix stack pointer
     j       load_mtx
      lw     cmd_w1_dram, (inputBufferEnd - 4)(inputBufferPos) // Load command word 1 again
-
-g_dma_io_ovl2:
-    jal     segmented_to_physical // Convert the provided segmented address (in cmd_w1_dram) to a virtual one
-     lh     dmemAddr, (inputBufferEnd - 0x07)(inputBufferPos) // Get the 16 bits in the middle of the command word (since inputBufferPos was already incremented for the next command)
-    andi    dmaLen, cmd_w0, 0x0FF8 // Mask out any bits in the length to ensure 8-byte alignment
-    li      nextRA, run_next_DL_command
-    j       dma_and_wait_goto_next_ra  // Trigger a DMA read or write, depending on the G_DMA_IO flag (which will occupy the sign bit of dmemAddr)
-     // At this point, dmemAddr's highest bit is the flag, it's next 13 bits are the DMEM address, and then it's last two bits are the upper 2 of size
-     // So an arithmetic shift right 2 will preserve the flag as being the sign bit and get rid of the 2 size bits, shifting the DMEM address to start at the LSbit
-     sra    dmemAddr, dmemAddr, 2
-
 
 ovl2_end:
 .align 8
