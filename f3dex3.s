@@ -747,7 +747,7 @@ $zero ---------------------------------- Hardwired zero ------------------------
 $1    v1 texptr    clipIdx    <------------- vtxLeft ------------------------------>  temp, init 0
 $2    v2 shdptr   <---------- clipAlloc -------> <----- lbPostAo   laPtr                  temp
 $3    v3 shdflg   clipTempVtx <------------- vLoopRet --------->  laVtxLeft               temp
-$4    <--------------- origV1Idx --------------> <----- lbFakeAmb laSpecFres
+$4    <--------------- origV1Idx -------------> <----- lbFakeAmb laSpecFres
 $5    ------------------------------------- vGeomMid ---------------------------------------------
 $6    v1flag temp <---------- clipPtrs --------> <-- lbTexgenOrRet laSTKept
 $7    v2flag tile clipWalkCount <----------- fogFlag ---------->  laPacked  mtx valid   cmd byte
@@ -790,7 +790,7 @@ perfCounterB   equ $29   // Performance counter B (functions depend on config)
 perfCounterC   equ $30   // Performance counter C (functions depend on config)
 
 // Tri write:
-origV1Idx      equ $4    // Original / current vertex 1 index (not address)
+origV1Idx     equ $4    // Original / current vertex 1 address
 
 // Vertex init:
 viLtFlag       equ $9    // Holds pointLightFlag or dirLightsXfrmValid
@@ -850,11 +850,12 @@ cmd_w1_dram    equ $24   // DL command word 1, which is also DMA DRAM addr
 cmd_w0         equ $25   // DL command word 0, also holds next tris info
 
 // Global vector regs:
+// TODO can maybe get rid of vZero
 vZero equ $v0  // All elements = 0; NOT global, only in tri write and clip. Mtx in vtx.
 vTRC  equ $v1  // Triangle Constants; NOT global, only in tri write and clip. Mtx in vtx.
 vOne  equ $v28 // All elements = 1; global
 // $v29: permanent temp register, also write results here to discard
-// $v30: vtx / lt = sSTO + persp norm + more lighting params
+// $v30: vtx / lt = sSTO + persp norm + more lighting params; tri write = snake saved index
 // $v31: Global constant vector register
 
 // Vertex / lighting vector regs:
@@ -1118,7 +1119,7 @@ G_POPMTX_handler:
 G_DMA_IO_handler:
     j       ovl234_ltbasic_entrypoint   // Delay slot is harmless
 G_BRANCH_WZ_handler:
-     lhu    $10, (vertexTable)(cmd_w0)  // Vertex addr from byte 3
+     mfc2   $10, $v7[6]                 // Vertex addr (index was byte 3)
 .if CFG_G_BRANCH_W                      // G_BRANCH_W/G_BRANCH_Z difference; this defines F3DZEX vs. F3DEX2
     lh      $10, VTX_W_INT($10)         // read the w coordinate of the vertex (f3dzex)
 .else
@@ -1173,7 +1174,7 @@ displaylist_dma_from_yield:
      lh     nextRA, tempTriRA
 
 G_MODIFYVTX_handler: // 3
-    lhu     $10, (vertexTable)(cmd_w0)   // Byte 3 = vtx being modified
+    mfc2    $10, $v7[6]  // Byte 3 = vtx being modified
     j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
      lbu    cmd_w0, (inputBufferEnd - 0x07)(inputBufferPos)  // offset in vtx, bit 15 clear
 
@@ -1222,8 +1223,11 @@ run_next_DL_command:
     lpv     $v4[0], (inputBufferEndSgn)(inputBufferPos) // Whole command
     beqz    inputBufferPos, displaylist_dma             // Check if buffer is empty
      lbu    $ra, (cmdMiniTable)($7)                     // Load mini table entry
+    vmudn   $v29, vOne, vTRC_VB                         // Address of vertex buffer
     lw      cmd_w0, (inputBufferEnd)(inputBufferPos)    // Word 0
+    vmadl   $v7, $v4, vTRC_VS                           // Plus vtx indices times length.
     lw      cmd_w1_dram, (inputBufferEnd + 4)(inputBufferPos) // Word 1
+    vmadl   $v6, $v31, $v31[2]                          // 0; copy in v6
     sll     $ra, $ra, 2                                 // Convert to a number of instructions
 .if CFG_PROFILING_C
     mfc0    $10, DPC_STATUS
@@ -1241,6 +1245,7 @@ run_next_DL_command:
     add     perfCounterD, perfCounterD, perfCounterC    // Add initial FIFO stall time to tri time; will subtract final FIFO time later
     sw      $10, startCounterTime
 .endif
+    vclr    vZero
     jr      $ra                                         // Jump to handler
      addi   inputBufferPos, inputBufferPos, 0x0008      // increment the DL index by 2 words
     // $7 must retain the command byte for load_mtx and command dispatch in overlays 2 and 3
@@ -2854,8 +2859,8 @@ ovl0_padded_end:
 ovl1_start:
 
 G_CULLDL_handler: // 15
-    lhu     $10, (vertexTable)(cmd_w0)      // Start vtx addr
-    lhu     $3, (vertexTable)(cmd_w1_dram)  // End vertex
+    mfc2    $10, $v7[6]                     // Start vtx addr (index was byte 3)
+    mfc2    $3, $v7[14]                     // End vertex addr (index was byte 7)
     /*
     CLIP_OCCLUDED can't be included here because: Suppose the list consists of N-1
     verts which are behind the occlusion plane, and 1 vert which is behind the camera
@@ -2970,10 +2975,10 @@ mtx_multiply:
      sqv    $v5[0], (0x0030)($3)
 
 G_VTX_handler: // 18
-    lhu     dmemAddr, (vertexTable)(cmd_w0)    // (v0 + n) end address; up to 56 inclusive
-    jal     segmented_to_physical              // Convert address in cmd_w1_dram to physical
+    mfc2    dmemAddr, $v7[6]       // (v0 + n) end address; up to 56 inclusive
+    jal     segmented_to_physical  // Convert address in cmd_w1_dram to physical
      lhu    vtxLeft, (inputBufferEnd - 0x07)(inputBufferPos) // vtxLeft = size in bytes = vtx count * 0x10
-    sub     dmemAddr, dmemAddr, vtxLeft        // Start addr = end addr - size. Rounded down to DMA word by H/W
+    sub     dmemAddr, dmemAddr, vtxLeft  // Start addr = end addr - size. Rounded down to DMA word by H/W
     li      $ra, vtx_after_dma
     j       dma_read_write
 G_SETOTHERMODE_H_handler: // These handler labels must be 4 bytes apart for the code below to work
