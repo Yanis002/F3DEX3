@@ -729,6 +729,7 @@ clipPolySgn equ (-(0x1000 - clipPoly)) // Underflow DMEM address
 // See rsp_defs.inc about why these are not used and we can reuse them.
 startCounterTime equ (OSTask + OSTask_ucode_size)
 xfrmLookatDirs equ -(0x1000 - (OSTask + OSTask_ucode_data)) // and OSTask_ucode_data_size
+savedOrigV1Addr equ (OSTask + OSTask_data_size)
 dumpDmemBuffer equ (OSTask + OSTask_yield_data_size)
 
 memsetBufferStart equ ((vertexBuffer + 0xF) & 0xFF0)
@@ -747,7 +748,7 @@ $zero ---------------------------------- Hardwired zero ------------------------
 $1    v1 texptr    clipIdx    <------------- vtxLeft ------------------------------>  temp, init 0
 $2    v2 shdptr   <---------- clipAlloc -------> <----- lbPostAo   laPtr                  temp
 $3    v3 shdflg   clipTempVtx <------------- vLoopRet --------->  laVtxLeft               temp
-$4    <--------------- origV1Idx -------------> <----- lbFakeAmb laSpecFres
+$4    <--------------- origV1Addr -------------> <----- lbFakeAmb laSpecFres
 $5    ------------------------------------- vGeomMid ---------------------------------------------
 $6    v1flag temp <---------- clipPtrs --------> <-- lbTexgenOrRet laSTKept
 $7    v2flag tile clipWalkCount <----------- fogFlag ---------->  laPacked  mtx valid   cmd byte
@@ -759,7 +760,7 @@ $12   ----------------------------------- perfCounterD -------------------------
 $13   ------------------------------------ altBaseReg --------------------------------------------
 $14   geom mode   <-------------------------- inVtx ------------------------------->
 $15                           <------------ outVtxBase ---------------------------->
-$16   
+$16   ----------------------------------- flatV1Offset -------------------------------------------
 $17   
 $18   
 $19      temp     clipCurVtx  <------------- outVtx1 ---------->   laL2A    <---------   dmaLen
@@ -790,7 +791,8 @@ perfCounterB   equ $29   // Performance counter B (functions depend on config)
 perfCounterC   equ $30   // Performance counter C (functions depend on config)
 
 // Tri write:
-origV1Idx     equ $4    // Original / current vertex 1 address
+origV1Addr     equ $4    // Original / current vertex 1 address
+flatV1Offset   equ $16   // Offset +'d to vtx 1 addr for flat shading. 0 except in clipping.
 
 // Vertex init:
 viLtFlag       equ $9    // Holds pointLightFlag or dirLightsXfrmValid
@@ -1104,6 +1106,7 @@ finish_setup:
 .endif
     sh      $zero, mvpValid  // and dirLightsXfrmValid
     lhu     vGeomMid, geometryModeLabel + 1
+    li      flatV1Offset, 0
     li      inputBufferPos, 0
     j       load_overlays_0_1
      li     cmd_w1_dram, orga(ovl1_start)
@@ -1300,7 +1303,7 @@ G_TRISNAKE_handler:
      li     $ra, tri_snake_loop          // For both init and above (clobbered by DMA).
     sw      cmd_w0, rdpHalf1Val          // Store indices a, b, c
     addi    inputBufferPos, inputBufferPos, -6 // Point to byte 2, index b of 1st tri
-    lbu     origV1Idx, rdpHalf1Val + 1   // Initial value, normally carried over
+    lbu     origV1Addr, rdpHalf1Val + 1   // Initial value, normally carried over
 tri_snake_loop:
     lh      $3, (inputBufferEnd)(inputBufferPos) // Load indices b and c
     addi    inputBufferPos, inputBufferPos, 1  // Increment indices being read
@@ -1308,10 +1311,10 @@ tri_snake_loop:
 tri_snake_loop_from_input_buffer:
      andi   $11, $3, 1                   // Get direction flag from index c
     bltz    $3, tri_snake_end            // Upper bit of real index b set = done
-     sb     origV1Idx, (rdpHalf1Val + 2)($11) // Store old v1 as 2 if dir clear or 3 if set
-    andi    origV1Idx, $3, 0x7E          // New v1 = mask out flags from index c
-    sb      origV1Idx, rdpHalf1Val + 1   // Store index c as vertex 1
-    j       tri_main_from_snake          // Repeat next instr so we can skip lbu origV1Idx
+     sb     origV1Addr, (rdpHalf1Val + 2)($11) // Store old v1 as 2 if dir clear or 3 if set
+    andi    origV1Addr, $3, 0x7E          // New v1 = mask out flags from index c
+    sb      origV1Addr, rdpHalf1Val + 1   // Store index c as vertex 1
+    j       tri_from_snake          // Repeat next instr so we can skip lbu origV1Addr
      lpv    $v7[0], (rdpHalf1Val - 4 - altBase)(altBaseReg) // To vector unit in elems 5-7
 
 // H = highest on screen = lowest Y value; then M = mid, L = low
@@ -1331,40 +1334,37 @@ tDaDyI equ $v27
 
 align_with_warning 8, "One instruction of padding before tris"
 
-G_TRI2_handler:
+.macro tri_v1_move
+    vmov    $v6[1], $v7[5] // Move next to cur vertex 1 addr. Must be after main tri code cause $v6 not saved.
+.endmacro
+
+G_TRI2_handler: // If we jumped here, want $ra next to be G_TRI1_handler
 G_QUAD_handler:
-    jal     tri_main                     // Send second tri; return here for first tri
-     sw     cmd_w1_dram, rdpHalf1Val     // Store second tri indices
-G_TRI1_handler:
-    li      $ra, tris_end                // After done with this tri, exit tri processing
-    sw      cmd_w0, rdpHalf1Val          // Store first tri indices
-tri_main:
-    lpv     $v7[0], (rdpHalf1Val - 4 - altBase)(altBaseReg) // To vector unit in elems 5-7
-    lbu     origV1Idx, rdpHalf1Val + 1
-tri_main_from_snake:
-    lbu     $2, rdpHalf1Val + 2
-    vclr    vZero
-    lbu     $3, rdpHalf1Val + 3
-    vmudn   $v29, vOne, vTRC_VB   // Address of vertex buffer
-    lhu     $1, (vertexTable)(origV1Idx)
-    vmadl   $v7, $v7, vTRC_VS     // Plus vtx indices times length. e5 (v1) kept through clipping
-    lhu     $2, (vertexTable)($2)
-    vmadl   $v6, $v31, $v31[2]    // 0; vtx 1 addr in $v6 elem 5
-    lhu     $3, (vertexTable)($3)
+    li      $ra, (G_TRI1_handler - (tris_end - G_TRI1_handler))
+G_TRI1_handler: // Whether we get here from cmd handler or prev tri, $ra == G_TRI1_handler
+    // $v6: -- V1 -- -- -- -- -- -- This vertex address 1
+    // $v7: -- -- V2 V3 -- N1 N2 N3 This and next vertex addresses
+    mfc2    $2, $v7[4]
+    mfc2    origV1Addr, $v6[2] // Can't move this up, $v6 is not ready yet when coming from return_and_end_mat
+    vmudh   $v6, vOne, $v6[1] // elem 2 of v6 = vertex 1 addr
+    addi    $ra, $ra, (tris_end - G_TRI1_handler) // So next go to tris_end
+tri_from_snake:
+    vmudh   $v4, vOne, $v7[2] // elem 2 of v4 = vertex 2 addr
 .if !ENABLE_PROFILING
-    // vnop
     addi    perfCounterB, perfCounterB, 0x4000  // Increment number of tris requested
 .endif
-tri_noinit: // ra is next cmd, second tri in TRI2, or middle of clipping
+    vmudh   $v8, vOne, $v7[3] // elem 2 of v8 = vertex 3 addr
+    mfc2    $3, $v7[6]
+    vmov    $v7[3], $v7[7]    // Move next to cur vertex 3 addr.
+tri_from_clip:
     vnxor   tHAtF, vZero, $v31[7]  // v5 = 0x8000; init frac value for attrs for rounding
-    vmov    $v4[5], $v7[6]         // elem 5 of v4 = vertex 2 addr
-    llv     $v6[0], VTX_SCR_VEC($1) // Load pixel coords of vertex 1 into v6 (elems 0, 1 = x, y)
-    vmov    $v8[5], $v7[7]         // elem 5 of v8 = vertex 3 addr
-    llv     $v4[0], VTX_SCR_VEC($2) // Load pixel coords of vertex 2 into v4
+    llv     $v6[0], VTX_SCR_VEC(origV1Addr) // Load pixel coords of vertex 1 into v6 (elems 0, 1 = x, y)
     vnxor   tMAtF, vZero, $v31[7]  // v7 = 0x8000; init frac value for attrs for rounding
-    llv     $v8[0], VTX_SCR_VEC($3) // Load pixel coords of vertex 3 into v8
+    llv     $v4[0], VTX_SCR_VEC($2) // Load pixel coords of vertex 2 into v4
     vnxor   tLAtF, vZero, $v31[7]  // v9 = 0x8000; init frac value for attrs for rounding
-    lhu     $6, VTX_CLIP($1)
+    llv     $v8[0], VTX_SCR_VEC($3) // Load pixel coords of vertex 3 into v8
+    vmov    $v7[2], $v7[6]    // Move next to cur vertex 2 addr.
+    lhu     $6, VTX_CLIP(origV1Addr)
     vmudh   $v2, vOne, $v6[1] // v2 all elems = y-coord of vertex 1
     lhu     $7, VTX_CLIP($2)
     vsub    $v10, $v6, $v4    // v10 = vertex 1 - vertex 2 (x, y, addr)
@@ -1402,7 +1402,6 @@ tri_noinit: // ra is next cmd, second tri in TRI2, or middle of clipping
      // 32 cycles
      vmrg   tLPos, tLPos, $v4 // v10 = max(vert1.y, vert2.y, vert3.y) < max(vert1.y, vert2.y) : highest(vert1, vert2) ? highest(vert1, vert2, vert3)
 tSubPxHF equ $v4
-tSubPxHI equ $v26
     vmudn   tSubPxHF, tHPos, $v31[5] // 0x4000
     beqz    $9, return_and_end_mat  // If cross product is 0, tri is degenerate (zero area), cull.
      // 34 cycles
@@ -1422,26 +1421,26 @@ tSubPxHI equ $v26
     bnez    $6, tri_culled_by_occlusion_plane // Cull if all verts occluded
      // 38 cycles
 .endif
-     mfc2   $1, tHPos[10]     // tHPos = lowest Y value = highest on screen (x, y, addr)
+     mfc2   $1, tHPos[4]     // tHPos = lowest Y value = highest on screen (x, y, addr)
     // 37 cycles if NOC (39 if occlusion plane)
 tPosCatI equ $v15 // 0 X L-M; 1 Y L-M; 2 X M-H; 3 X L-H; 4-7 garbage
     vsub    tPosCatI, tLPos, tMPos
-    mfc2    $2, tMPos[10]     // tMPos = mid vertex (x, y, addr)
+    mfc2    $2, tMPos[4]     // tMPos = mid vertex (x, y, addr)
     vmov    tPosCatI[2], tPosMmH[0]
 .if !ENABLE_PROFILING
     andi    $11, vGeomMid, G_SHADING_SMOOTH >> 8
 .endif
     vmudh   $v29, tPosMmH, tPosLmH[0]
-    li      $19, 0x0020       // Constant for some scaling below
+    li      $20, 0x0020       // Constant for some scaling below
 t1WI equ $v13 // elems 0, 4, 6
     vmadh   $v29, tPosLmH, tPosHmM[0]
-    mfc2    $3, tLPos[10]     // tLPos = highest Y value = lowest on screen (x, y, addr)
+    mfc2    $3, tLPos[4]     // tLPos = highest Y value = lowest on screen (x, y, addr)
 tXPF equ $v16 // Triangle cross product
 tXPI equ $v17
     vreadacc tXPI, ACC_UPPER
-.if !ENABLE_PROFILING
-    mfc2    $10, $v7[10]  // Orig V1 addr. origV1Idx is the index (not addr), and we can't lookup in vertexTable during clipping!
-.endif
+    add     $19, origV1Addr, flatV1Offset
+    // TODO move this to alpha compare cull no nop, move both branches out of line
+    sb      $zero, materialCullMode // Covers tri write (non early exit)
     vreadacc tXPF, ACC_MIDDLE
     lpv     tHAtI[0], VTX_COLOR_VEC($1) // Load vert color of vertex 1
     vrcp    $v20[0], tPosCatI[1]
@@ -1450,7 +1449,7 @@ tXPI equ $v17
     lpv     tLAtI[0], VTX_COLOR_VEC($3) // Load vert color of vertex 3
     vrcph   $v22[0], tXPI[1]
 .if !ENABLE_PROFILING
-    lpv     $v25[0], VTX_COLOR_VEC($10)  // Load RGB from orig vtx 1 for flat shading
+    lpv     $v25[0], VTX_COLOR_VEC($19) // Load RGB from orig vtx 1 for flat shading
 .endif
 tXPRcpF equ $v23 // Reciprocal of cross product (becomes that * 4)
 tXPRcpI equ $v24
@@ -1469,7 +1468,7 @@ tri_skip_flat_shading:
 .endif
     // 44 cycles
     vrcp    $v20[2], tPosMmH[1]
-    mtc2    $19, $v25[0] // 0020
+    mtc2    $20, $v25[0] // 0020
     vrcph   $v22[2], tPosMmH[1]
     llv     t1WI[0], VTX_INV_W_VEC($1)
     vrcp    $v20[3], tPosLmH[1]
@@ -1508,6 +1507,7 @@ tPosCatF equ $v25
     sub     $11, $6, $7  // Four instr: $6 = max($6, $7)
     vsubc   tSubPxHF, vZero, tSubPxHF
     sra     $10, $11, 31
+tSubPxHI equ $v26
     vsub    tSubPxHI, vZero, vZero
     and     $11, $11, $10
     vmudm   $v29, tPosCatF, $v20
@@ -1707,6 +1707,7 @@ tri_return_from_decal_fix_z:
     sdv     tHAtF[0], 0x0010($2)   // Store RGBA shade color (fractional)
     vmrg    $v10, tHAtF, tHAtI[7]  // Elems 6-7: ZI:F
     sdv     tHAtI[0], 0x0000($2)   // Store RGBA shade color (integer)
+    tri_v1_move                    // From return_and_end_mat, we didn't go there
     sdv     tHAtF[8], 0x0010($1)   // Store S, T, W texture coefficients (fractional)
     sdv     tHAtI[8], 0x0000($1)   // Store S, T, W texture coefficients (integer)
     slv     tDaDyI[12], 0x0C($10)  // DzDyI:F
@@ -1772,19 +1773,14 @@ flush_rdp_buffer: // Prereq: dmemAddr = rdpCmdBufPtr - rdpCmdBufEndP1, or dmemAd
     j       dma_read_write
      addi   rdpCmdBufPtr, rdpCmdBufEndP1, -(RDP_CMD_BUFSIZE + 8)
 
-tri_decal_fix_z:
-    // Valid range of tHAtI = 0 to 7FFF, but most of the scene is large values
-    vmudh   $v29, vOne, vTRC_DO  // accum all elems = -DM/2
-    vmadm   $v25, tHAtI, vTRC_DM // elem 7 = (0 to DM/2-1) - DM/2 = -DM/2 to -1
-    vcr     tDaDyI, tDaDyI, $v25[7] // Clamp DzDyI (6) to <= -val or >= val; clobbers DzDyF (7)
-    j       tri_return_from_decal_fix_z
-     set_vcc_11110001 // Clobbered by vcr
+align_with_warning 8, "One instruction of padding before return_and_end_mat"
 
 tri_culled_by_occlusion_plane:
 .if CFG_PROFILING_B
     addi    perfCounterB, perfCounterB, 0x4000
 .endif
 return_and_end_mat:
+    tri_v1_move
     jr      $ra
      sb     $zero, materialCullMode // This covers all tri early exits except clipping
 
@@ -1796,6 +1792,14 @@ tri_snake_end:
     addi    $11, $zero, 0xFFFFFFF8            // Sign-extend; andi is zero-extend!
     j       tris_end
      and    inputBufferPos, inputBufferPos, $11 // inputBufferPos has to be negative
+
+tri_decal_fix_z:
+    // Valid range of tHAtI = 0 to 7FFF, but most of the scene is large values
+    vmudh   $v29, vOne, vTRC_DO  // accum all elems = -DM/2
+    vmadm   $v25, tHAtI, vTRC_DM // elem 7 = (0 to DM/2-1) - DM/2 = -DM/2 to -1
+    vcr     tDaDyI, tDaDyI, $v25[7] // Clamp DzDyI (6) to <= -val or >= val; clobbers DzDyF (7)
+    j       tri_return_from_decal_fix_z
+     set_vcc_11110001 // Clobbered by vcr
 
 align_with_warning 8, "One instruction of padding before ovl234"
 
@@ -1910,10 +1914,11 @@ clip_after_constants:
     addi    perfCounterB, perfCounterB, 1  // Increment clipped (input) tris count
 .endif
     sqv     vZero[0], (clipPolySgn)($zero) // Clear whole polygon
-    sh      $1, clipPoly + 0xA       // Initial polygon is right-justified
+    sh      origV1Addr, clipPoly + 0xA  // Initial polygon is right-justified
     sh      $2, clipPoly + 0xC
     sh      $3, clipPoly + 0xE
     sb      $zero, materialCullMode  // In case only/all tri(s) clip then offscreen
+    sh      origV1Addr, savedOrigV1Addr // Needs to be restored after clip for snake
     li      clipMaskIdx, 5           // Will sub 1; 4=screen, 3=+x, 2=-x, 1=+y, 0=-y
     li      clipAlloc, 0             // Init to no temp verts allocated
 clip_condlooptop:
@@ -2130,15 +2135,17 @@ clip_next_cond:
 // clipDrawPtr <- clipMaskIdx; currently at 0
 // Draws verts in pattern like 4-2-3, 4-1-2, 4-0-1
     li      $ra, clip_draw_tris_loop
+    // TODO set flatV1Offset
 clip_draw_tris_loop:
-    lhu     $2,      (clipPolySgn + 0xA)(clipDrawPtr)
-    lhu     $3,      (clipPolySgn + 0xC)(clipDrawPtr)
-    lhu     $1,      (clipPolySgn + 0xE)($zero)
+    addi    clipDrawPtr, clipDrawPtr, -2
+    lh      $2,         (clipPolySgn + 0xC)(clipDrawPtr)
+    llv     $v4[4],     (clipPolySgn + 0xC)(clipDrawPtr) // +A ($2), +C ($3) to elem 2, 3
+    lh      origV1Addr, (clipPolySgn + 0xE)($zero)
     beqz    $2, clip_done
-     addi   clipDrawPtr, clipDrawPtr, -2
-    llv     $v7[12], (clipPolySgn + 0xC)(clipDrawPtr) // +A ($2) to elem 6, +C ($3) to elem 7
-    j       tri_noinit                                // Can't clobber $v7[10], keeps orig v1 addr
-     lsv    $v6[10], (clipPolySgn + 0xE)($zero)       // +E ($1) to elem 5
+     lh     $3,         (clipPolySgn + 0xE)(clipDrawPtr)
+    vmov    $v8[2], $v4[3]                               // +C ($3) to elem 2
+    j       tri_from_clip
+     lsv    $v6[4],     (clipPolySgn + 0xE)($zero)       // +E (origV1Addr) to elem 2
 
 clip_timeout:
     bltz    clipWalkPhase, clip_next_cond // Timed out in find on to off: all onscreen, nothing to do for this cond
@@ -2149,6 +2156,10 @@ clip_err_insert:
 clip_done:    // Delay slot is harmless if branched
      li     $11, CLIP_SCAL_NPXY | CLIP_CAMPLANE
     sh      $11, activeClipPlanes
+    // snake_c_to_v30 TODO
+    tri_v1_move
+    li      flatV1Offset, 0
+    lh      origV1Addr, savedOrigV1Addr
     lh      $ra, tempTriRA
 fill_vertex_table:
     // Create bytes 00-07
