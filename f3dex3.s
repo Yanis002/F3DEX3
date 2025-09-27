@@ -413,9 +413,9 @@ decalFixOff equ (-(decalFixMult / 2))
     .dh 0x7E00 // vertex index mask for snake
     .dh decalFixMult // defined above
     .dh decalFixOff  // negative
-    .dh 0xFFF8 // used once in tri write, mask away lower ST bits
+    .dh 0x0020 // used in tri write and vtx addr manip
     .dh 0x0100 // used several times in tri write
-    .dh 0x1000 // some multiplier in tri write, increment in vertex indices
+    .dh 0x1000 // some multiplier in tri write, vtx addr manip
 .macro set_vcc_11110001
     vge    $v29, vTRC, vTRC[0]
 .endmacro
@@ -427,7 +427,7 @@ vTRC_VS   equ vTRC[1] // Vertex Size
 vTRC_7E00 equ vTRC[2]
 vTRC_DM   equ vTRC[3] // Decal Multiplier
 vTRC_DO   equ vTRC[4] // Decal Offset
-vTRC_FFF8 equ vTRC[5]
+vTRC_0020 equ vTRC[5]
 vTRC_0100 equ vTRC[6]
 vTRC_1000 equ vTRC[7]
 vTRC_0100_addr equ (vTRCValue + 2 * 6)
@@ -1220,9 +1220,10 @@ G_SPNOOP_handler:
 run_next_DL_command:
      lb     $7, (inputBufferEnd)(inputBufferPos)        // Command byte
     lpv     $v4[0], (inputBufferEndSgn)(inputBufferPos) // Whole command
+    vclr    vZero
     beqz    inputBufferPos, displaylist_dma             // Check if buffer is empty
      lbu    $ra, (cmdMiniTable)($7)                     // Load mini table entry
-    vclr    vZero
+    vmudh   $v3, $v31, vTRC_1000                        // $v3[3] = 2 * 1000 = 2000 for vtx addr manip
     lw      cmd_w0, (inputBufferEnd)(inputBufferPos)    // Word 0
     vmudl   $v5, $v4, vTRC_VS                           // Vtx indices times length
     lw      cmd_w1_dram, (inputBufferEnd + 4)(inputBufferPos) // Word 1
@@ -1427,7 +1428,7 @@ tPosCatI equ $v15 // 0 X L-M; 1 Y L-M; 2 X M-H; 3 X L-H; 4-7 garbage
     andi    $11, vGeomMid, G_SHADING_SMOOTH >> 8
 .endif
     vmudh   $v29, tPosMmH, tPosLmH[0]
-    li      $20, 0x0020       // Constant for some scaling below
+    li      $20, -8       // 0xFFF8; constant for some mask below
 t1WI equ $v13 // elems 0, 4, 6
     vmadh   $v29, tPosLmH, tPosHmM[0]
     mfc2    $3, tLPos[4]     // tLPos = highest Y value = lowest on screen (x, y, addr)
@@ -1464,7 +1465,7 @@ tri_skip_flat_shading:
 .endif
     // 44 cycles
     vrcp    $v20[2], tPosMmH[1]
-    mtc2    $20, $v25[0] // 0020
+    mtc2    $20, tMPos[14] // 0xFFF8; only elem 0, 1, 2 of this reg used now
     vrcph   $v22[2], tPosMmH[1]
     llv     t1WI[0], VTX_INV_W_VEC($1)
     vrcp    $v20[3], tPosLmH[1]
@@ -1477,9 +1478,9 @@ tri_skip_flat_shading:
     lw      $6, VTX_INV_W_VEC($1) // $6, $7, $8 = 1/W for H, M, L
     vmudl   tLAtI, tLAtI, vTRC_0100 // vertex color 3 >>= 8
     lw      $7, VTX_INV_W_VEC($2)
-    vmudl   $v29, $v20, $v25[0] // 0020
+    vmudl   $v29, $v20, vTRC_0020
     lw      $8, VTX_INV_W_VEC($3)
-    vmadm   $v22, $v22, $v25[0] // 0020
+    vmadm   $v22, $v22, vTRC_0020
     beqz    $20, tri_skip_alpha_compare_cull
      vmadn  $v20, $v31, $v31[2] // 0
     // Alpha compare culling
@@ -1522,7 +1523,7 @@ tSubPxHI equ $v26
     lbu     $14, geometryModeLabel + 3 // Load lowest byte for G_SHADE, G_ZBUFFER. Also has G_ATTROFFSET_ST_ENABLE, but G_TRI_FILL will get OR'd into it and force that set.
     vmadh   tXPI, tXPRcpI, tXPI
     lbu     $9, textureSettings1 + 3 // Texture enabled = 0x2
-    vand    $v22, $v20, vTRC_FFF8
+    vand    $v22, $v20, tMPos[7] // 0xFFF8
     lsv     tMAtI[14], VTX_SCR_Z($2)
     vcr     tPosCatI, tPosCatI, vTRC_0100
     lsv     tLAtI[14], VTX_SCR_Z($3)
@@ -2191,9 +2192,10 @@ ovl3_padded_end:
 ovl234_end:
 
 // Converts the segmented address in cmd_w1_dram to the corresponding physical address
-segmented_to_physical: // 7
+segmented_to_physical: // 8
     srl     $11, cmd_w1_dram, 22          // Copy (segment index << 2) into $11
     andi    $11, $11, 0x3C                // Clear the bottom 2 bits that remained during the shift
+    vadd    $v8, $v8, $v9[1]              // elem 2 = vertex count * size
     lw      $11, (segmentTable)($11)      // Get the current address of the segment
     sll     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address to the left so that the top 8 bits are shifted out
     srl     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address back to the right, resulting in the original with the top 8 bits cleared
@@ -2201,9 +2203,7 @@ segmented_to_physical: // 7
      add    cmd_w1_dram, cmd_w1_dram, $11 // Add the segment's address to the masked input address, resulting in the virtual address
 
 vtx_after_dma:
-    srl     $2, cmd_w0, 11                     // n << 1
-    sub     $2, cmd_w0, $2                     // = v0 << 1
-    lhu     outVtxBase, (vertexTable)($2)      // Address of output start
+    mfc2    outVtxBase, $v8[6]                 // Address of output start
     andi    inVtx, dmemAddr, 0xFFF8            // Round down input start addr to DMA word
 .if COUNTER_A_UPPER_VERTEX_COUNT
     sll     $11, vtxLeft, 12                   // Vtx count * 0x10000
@@ -2981,12 +2981,24 @@ mtx_multiply:
     jr      $ra
      sqv    $v5[0], (0x0030)($3)
 
-G_VTX_handler: // 18
+align_with_warning 8, "One instruction of padding before G_VTX_handler"
+
+G_VTX_handler: // 21
+    // Vertex command is 01 0H L0 ee, where n = HL (number of vertices).
+    // $v5[1] = 0H * 13, $v5[2] = L0 * 13.
+    // ($v5[2] >> 10) * 2 = 0L * 26 = $v8[2]
+    // ($v5[1] << 10) * 2 = H0 * 26 = $v9[1]
+    // In segmented_to_physical, add, now $v8[2] = HL * 26 = n * 26.
+    // Currently $v7[3] = end addr = (v0 + n) * 26 + base
+    // Subtract -> $v8[3] = v0 * 26 + base = start addr.
+    vmudl   $v8, $v5, $v3[3]       // 0x2000; elem 2 = low part
     mfc2    dmemAddr, $v7[6]       // (v0 + n) end address; up to 56 inclusive
+    vmudn   $v9, $v5, vTRC_0020    // 0020; elem 1 = high part
     jal     segmented_to_physical  // Convert address in cmd_w1_dram to physical
      lhu    vtxLeft, (inputBufferEnd - 0x07)(inputBufferPos) // vtxLeft = size in bytes = vtx count * 0x10
     sub     dmemAddr, dmemAddr, vtxLeft  // Start addr = end addr - size. Rounded down to DMA word by H/W
     li      $ra, vtx_after_dma
+    vsub    $v8, $v7, $v8[2]       // elem 3 = v0 start address
     j       dma_read_write
 G_SETOTHERMODE_H_handler: // These handler labels must be 4 bytes apart for the code below to work
      addi   dmaLen, vtxLeft, -1                // Only for above, nop for below
