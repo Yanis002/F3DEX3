@@ -1172,10 +1172,6 @@ load_overlays_0_1:
     j       load_overlay_inner
      li     dmemAddr, 0x1000
 
-displaylist_dma_from_yield:
-    j       displaylist_dma_goto_next_ra
-     lh     nextRA, tempTriRA
-
 G_MODIFYVTX_handler: // 3
     mfc2    $10, $v7[6]  // Byte 3 = vtx being modified
     j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
@@ -1226,11 +1222,11 @@ run_next_DL_command:
     lpv     $v4[0], (inputBufferEndSgn)(inputBufferPos) // Whole command
     beqz    inputBufferPos, displaylist_dma             // Check if buffer is empty
      lbu    $ra, (cmdMiniTable)($7)                     // Load mini table entry
-    vmudn   $v29, vOne, vTRC_VB                         // Address of vertex buffer
+    vclr    vZero
     lw      cmd_w0, (inputBufferEnd)(inputBufferPos)    // Word 0
-    vmadl   $v7, $v4, vTRC_VS                           // Plus vtx indices times length.
+    vmudl   $v5, $v4, vTRC_VS                           // Vtx indices times length
     lw      cmd_w1_dram, (inputBufferEnd + 4)(inputBufferPos) // Word 1
-    vmadl   $v6, $v31, $v31[2]                          // 0; copy in v6
+    vmadn   $v7, vOne, vTRC_VB                          // Plus address of vertex buffer
     sll     $ra, $ra, 2                                 // Convert to a number of instructions
 .if CFG_PROFILING_C
     mfc0    $10, DPC_STATUS
@@ -1248,7 +1244,7 @@ run_next_DL_command:
     add     perfCounterD, perfCounterD, perfCounterC    // Add initial FIFO stall time to tri time; will subtract final FIFO time later
     sw      $10, startCounterTime
 .endif
-    vclr    vZero
+    vmadl   $v6, $v31, $v31[2]                          // 0; copy in v6
     jr      $ra                                         // Jump to handler
      addi   inputBufferPos, inputBufferPos, 0x0008      // increment the DL index by 2 words
     // $7 must retain the command byte for load_mtx and command dispatch in overlays 2 and 3
@@ -1918,7 +1914,6 @@ clip_after_constants:
     sh      $2, clipPoly + 0xC
     sh      $3, clipPoly + 0xE
     sb      $zero, materialCullMode  // In case only/all tri(s) clip then offscreen
-    sh      origV1Addr, savedOrigV1Addr // Needs to be restored after clip for snake
     li      clipMaskIdx, 5           // Will sub 1; 4=screen, 3=+x, 2=-x, 1=+y, 0=-y
     li      clipAlloc, 0             // Init to no temp verts allocated
 clip_condlooptop:
@@ -2134,13 +2129,14 @@ clip_next_cond:
      sh     $zero, activeClipPlanes // Only matters if we need to draw
 // clipDrawPtr <- clipMaskIdx; currently at 0
 // Draws verts in pattern like 4-2-3, 4-1-2, 4-0-1
+    lh      $11, (clipPolySgn + 0xE)($zero)
     li      $ra, clip_draw_tris_loop
-    // TODO set flatV1Offset
+    sub     flatV1Offset, origV1Addr, $11 // Offset = real orig addr - cur V1
+    move    origV1Addr, $11
 clip_draw_tris_loop:
     addi    clipDrawPtr, clipDrawPtr, -2
     lh      $2,         (clipPolySgn + 0xC)(clipDrawPtr)
     llv     $v4[4],     (clipPolySgn + 0xC)(clipDrawPtr) // +A ($2), +C ($3) to elem 2, 3
-    lh      origV1Addr, (clipPolySgn + 0xE)($zero)
     beqz    $2, clip_done
      lh     $3,         (clipPolySgn + 0xE)(clipDrawPtr)
     vmov    $v8[2], $v4[3]                               // +C ($3) to elem 2
@@ -2158,8 +2154,8 @@ clip_done:    // Delay slot is harmless if branched
     sh      $11, activeClipPlanes
     // snake_c_to_v30 TODO
     tri_v1_move
+    add     origV1Addr, origV1Addr, flatV1Offset // Real orig addr = cur V1 + offset
     li      flatV1Offset, 0
-    lh      origV1Addr, savedOrigV1Addr
     lh      $ra, tempTriRA
 fill_vertex_table:
     // Create bytes 00-07
@@ -3006,6 +3002,10 @@ G_SETOTHERMODE_L_handler:
     sw      $3, (othermode0 - G_SETOTHERMODE_H_handler)($ra)
     j       G_RDP_handler
      lpv    $v4[0], (otherMode0)($zero)
+
+displaylist_dma_from_yield:
+    j       displaylist_dma_goto_next_ra
+     lh     nextRA, tempTriRA
 
 G_GEOMETRYMODE_handler: // 6
     lw      $11, geometryModeLabel        // load the geometry mode value
