@@ -655,29 +655,22 @@ vertexBuffer:
 // Space for temporary verts for clipping code, and reused for other things
 clipTempVerts:
 
-// Round up to 0x10
-.org ((clipTempVerts + 0xF) & 0xFF0)
-// Vertex addresses, to avoid a multiply-add for each vertex index lookup
-vertexTable:
-    .skip ((G_MAX_VERTS + 8) * 2) // halfword for each vertex; need 1 extra end addr, easier to write 8 extra
-    
-.if (. & 15) != 0
-    .error "tempMatrix not aligned"
-.endif
-
-tempMatrix:
+// Round up to 0x8
+.org ((clipTempVerts + 0x7) & 0xFF8)
+   
 texrectState:
     .skip 8  // Only needs to be saved over texrect, half1, half2; but yield can happen
 
 .if . > yieldDataFooter
-    // Need to fit everything through vertex buffer in yield buffer, and also texrectState.
-    // Would like to also fit vertexTable to avoid recompute after yield.
-    // Putting texrectState after vertexTable for alignment reasons.
+    // Need to fit everything through here in yield buffer
     .error "Too much being stored in yieldable DMEM"
 .endif
 
-    // Rest of tempMatrix
-    .skip 0x40 - 8
+// Round up to 0x10
+.org ((texrectState + 0xF) & 0xFF0)
+
+tempMatrix:
+    .skip 0x40
 
 .if . > (clipTempVerts + CLIP_TEMP_VERTS_SIZE_BYTES)
     .error "Too much in clipTempVerts"
@@ -1097,8 +1090,7 @@ continue_from_os_task:
     lw      perfCounterB, mvpMatrix + YDF_OFFSET_PERFCOUNTERB
     lw      perfCounterC, mvpMatrix + YDF_OFFSET_PERFCOUNTERC
     lw      perfCounterD, mvpMatrix + YDF_OFFSET_PERFCOUNTERD
-    jal     fill_vertex_table
-     lw     taskDataPtr, OSTask + OSTask_data_ptr
+    lw      taskDataPtr, OSTask + OSTask_data_ptr
 finish_setup:
 .if CFG_PROFILING_C
     mfc0    $11, DPC_CLOCK
@@ -1172,10 +1164,17 @@ load_overlays_0_1:
     j       load_overlay_inner
      li     dmemAddr, 0x1000
 
-G_MODIFYVTX_handler: // 3
-    mfc2    $10, $v7[6]  // Byte 3 = vtx being modified
-    j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
-     lbu    cmd_w0, (inputBufferEnd - 0x07)(inputBufferPos)  // offset in vtx, bit 15 clear
+G_RDPHALF_2_handler: // 8; should be after the handlers with alignment needs
+    li      $11, texrectState
+    ldv     $v29[0], (0)($11)
+    sb      $zero, materialCullMode         // This covers tex and fill rects
+    lw      cmd_w0, rdpHalf1Val             // load the RDPHALF1 value into w0
+    addi    rdpCmdBufPtr, rdpCmdBufPtr, 8
+.if !ENABLE_PROFILING
+    addi    perfCounterB, perfCounterB, 1   // Increment number of tex/fill rects
+.endif
+    j       send_w0_w1_to_rdp               // w1 is from the current command
+     sdv    $v29[0], -8(rdpCmdBufPtr)
 
 G_SETxIMG_handler: // 12
     lb      $3, materialCullMode            // Get current mode
@@ -1436,8 +1435,6 @@ tXPF equ $v16 // Triangle cross product
 tXPI equ $v17
     vreadacc tXPI, ACC_UPPER
     add     $19, origV1Addr, flatV1Offset
-    // TODO move this to alpha compare cull no nop, move both branches out of line
-    sb      $zero, materialCullMode // Covers tri write (non early exit)
     vreadacc tXPF, ACC_MIDDLE
     lpv     tHAtI[0], VTX_COLOR_VEC($1) // Load vert color of vertex 1
     vrcp    $v20[0], tPosCatI[1]
@@ -1452,20 +1449,13 @@ tXPRcpF equ $v23 // Reciprocal of cross product (becomes that * 4)
 tXPRcpI equ $v24
     vrcpl   tXPRcpF[1], tXPF[1]
 .if !ENABLE_PROFILING
-    bnez    $11, tri_skip_flat_shading  // Branch if G_SHADING_SMOOTH is set
+    beqz    $11, tri_flat_shading  // Branch if G_SHADING_SMOOTH is clear
 .endif
      vrcph  tXPRcpI[1], $v31[2]            // 0
-.if !ENABLE_PROFILING
-    vlt     $v29, $v31, $v31[3]         // Set vcc to 11100000
-    vmrg    tHAtI, $v25, tHAtI        // RGB from original vtx 1, alpha from $1
-    vmrg    tMAtI, $v25, tMAtI        // RGB from original vtx 1, alpha from $2
-    vmrg    tLAtI, $v25, tLAtI        // RGB from original vtx 1, alpha from $3
-align_with_warning 8, "One instruction of padding before tri_skip_flat_shading"
-tri_skip_flat_shading:
-.endif
+tri_return_from_flat_shading:
     // 44 cycles
     vrcp    $v20[2], tPosMmH[1]
-    mtc2    $20, tMPos[14] // 0xFFF8; only elem 0, 1, 2 of this reg used now
+    ssv     tPosMmH[2], 0x0030(rdpCmdBufPtr) // MmHY -> first short (temp mem)
     vrcph   $v22[2], tPosMmH[1]
     llv     t1WI[0], VTX_INV_W_VEC($1)
     vrcp    $v20[3], tPosLmH[1]
@@ -1473,7 +1463,7 @@ tri_skip_flat_shading:
     vrcph   $v22[3], tPosLmH[1]
     llv     t1WI[12], VTX_INV_W_VEC($3)
     vmudl   tHAtI, tHAtI, vTRC_0100 // vertex color 1 >>= 8
-    lb      $20, (alphaCompareCullMode)($zero)
+    lb      $11, (alphaCompareCullMode)($zero)
     vmudl   tMAtI, tMAtI, vTRC_0100 // vertex color 2 >>= 8
     lw      $6, VTX_INV_W_VEC($1) // $6, $7, $8 = 1/W for H, M, L
     vmudl   tLAtI, tLAtI, vTRC_0100 // vertex color 3 >>= 8
@@ -1481,25 +1471,14 @@ tri_skip_flat_shading:
     vmudl   $v29, $v20, vTRC_0020
     lw      $8, VTX_INV_W_VEC($3)
     vmadm   $v22, $v22, vTRC_0020
-    beqz    $20, tri_skip_alpha_compare_cull
+    bnez    $11, tri_alpha_compare_cull
      vmadn  $v20, $v31, $v31[2] // 0
-    // Alpha compare culling
-    vge     $v26, tHAtI, tMAtI
-    lbu     $19, alphaCompareCullThresh
-    vlt     $v25, tHAtI, tMAtI
-    bgtz    $20, @@skip1
-     vge    $v26, $v26, tLAtI // If alphaCompareCullMode > 0, $v26 = max of 3 verts
-    vlt     $v26, $v25, tLAtI // else if < 0, $v26 = min of 3 verts
-@@skip1: // $v26 elem 3 has max or min alpha value
-    mfc2    $24, $v26[6]
-    sub     $24, $24, $19 // sign bit set if (max/min) < thresh
-    xor     $24, $24, $20 // invert sign bit if other cond. Sign bit set -> cull
-    bltz    $24, return_and_end_mat // if max < thresh or if min >= thresh.
-tri_skip_alpha_compare_cull:
+// $v6 <- tPosMmH; $v6 clobbered in alpha compare cull
+tri_return_from_alpha_compare_cull: // Uses $v25, $v26
     // 60 cycles
 tPosCatF equ $v25
     vmudm   tPosCatF, tPosCatI, vTRC_1000
-    // no nop if tri_skip_alpha_compare_cull was unaligned
+    mtc2    $20, tMPos[14] // 0xFFF8; only elem 0, 1, 2 of this reg used now
     vmadn   tPosCatI, $v31, $v31[2] // 0
     sub     $11, $6, $7  // Four instr: $6 = max($6, $7)
     vsubc   tSubPxHF, vZero, tSubPxHF
@@ -1558,7 +1537,7 @@ tMnWI equ $v25 // <- tMx1W
     lw      $19, otherMode1
 tSTWHMI equ $v22 // H = elems 0-2, M = elems 4-6; init W = 7FFF
     vmudh   tSTWHMI, vOne, $v31[7]  // 0x7FFF
-    ssv     tPosMmH[2], 0x0030(rdpCmdBufPtr) // MmHY -> first short (temp mem)
+    sb      $zero, materialCullMode // Covers tri write (non early exit)
     vmudm   $v29, t1WI, tMnWF[0] // 1/W each vtx * min W = 1 for one of the verts, < 1 for others
     llv     tSTWHMI[0], VTX_TC_VEC($1)
     vmadl   $v29, t1WF, tMnWF[0]
@@ -1770,14 +1749,28 @@ flush_rdp_buffer: // Prereq: dmemAddr = rdpCmdBufPtr - rdpCmdBufEndP1, or dmemAd
     j       dma_read_write
      addi   rdpCmdBufPtr, rdpCmdBufEndP1, -(RDP_CMD_BUFSIZE + 8)
 
-align_with_warning 8, "One instruction of padding before return_and_end_mat"
+align_with_warning 8, "One instruction of padding before tri_alpha_compare_cull"
 
+tri_alpha_compare_cull:
+// Alpha compare culling
+    vge     $v26, tHAtI, tMAtI
+    lbu     $19, alphaCompareCullThresh
+    vlt     $v25, tHAtI, tMAtI
+    bgtz    $11, @@skip1
+     vge    $v26, $v26, tLAtI // If alphaCompareCullMode > 0, $v26 = max of 3 verts
+    vlt     $v26, $v25, tLAtI // else if < 0, $v26 = min of 3 verts
+@@skip1: // $v26 elem 3 has max or min alpha value
+    mfc2    $24, $v26[6]
+    sub     $24, $24, $19 // sign bit set if (max/min) < thresh
+    xor     $24, $24, $11 // invert sign bit if other cond. Sign bit set -> cull,
+    bgez    $24, tri_return_from_alpha_compare_cull // if max < thresh or if min >= thresh.
 tri_culled_by_occlusion_plane:
 .if CFG_PROFILING_B
+     nop
     addi    perfCounterB, perfCounterB, 0x4000
 .endif
 return_and_end_mat:
-    tri_v1_move
+     tri_v1_move // overwrites $v6[1]
     jr      $ra
      sb     $zero, materialCullMode // This covers all tri early exits except clipping
 
@@ -1790,13 +1783,14 @@ tri_snake_end:
     j       tris_end
      and    inputBufferPos, inputBufferPos, $11 // inputBufferPos has to be negative
 
-tri_decal_fix_z:
-    // Valid range of tHAtI = 0 to 7FFF, but most of the scene is large values
-    vmudh   $v29, vOne, vTRC_DO  // accum all elems = -DM/2
-    vmadm   $v25, tHAtI, vTRC_DM // elem 7 = (0 to DM/2-1) - DM/2 = -DM/2 to -1
-    vcr     tDaDyI, tDaDyI, $v25[7] // Clamp DzDyI (6) to <= -val or >= val; clobbers DzDyF (7)
-    j       tri_return_from_decal_fix_z
-     set_vcc_11110001 // Clobbered by vcr
+.if !ENABLE_PROFILING
+tri_flat_shading:
+    vlt     $v29, $v31, $v31[3]       // Set vcc to 11100000
+    vmrg    tHAtI, $v25, tHAtI        // RGB from original vtx 1, alpha from $1
+    vmrg    tMAtI, $v25, tMAtI        // RGB from original vtx 1, alpha from $2
+    j       tri_return_from_flat_shading
+     vmrg   tLAtI, $v25, tLAtI        // RGB from original vtx 1, alpha from $3
+.endif
 
 align_with_warning 8, "One instruction of padding before ovl234"
 
@@ -2158,26 +2152,6 @@ clip_done:    // Delay slot is harmless if branched
     add     origV1Addr, origV1Addr, flatV1Offset // Real orig addr = cur V1 + offset
     li      flatV1Offset, 0
     lh      $ra, tempTriRA
-fill_vertex_table:
-    // Create bytes 00-07
-    li      $1, 7
-@@loop1:
-    sb      $1, (vertexTable)($1)
-    bgtz    $1, @@loop1
-     addi   $1, $1, -1
-    // Load to vu and multiply by 2 to get vertex indexes. It would be more cycles
-    // to change the loop above to count by 2s than the stalls here.
-    li      $2, vertexTable
-    lpv     $v3[0], (0)($2)
-    li      $3, vertexTable + ((G_MAX_VERTS + 8) * 2) // Need 0-56 inclusive, so do 0-63
-    vmudh   $v3, $v3, $v31[3] // 2; now 0x0000, 0x0200, ..., 0x0E00
-@@loop2:
-    vmudn   $v29, vOne, vTRC_VB  // Address of vertex buffer
-    vmadl   $v4, $v3, vTRC_VS    // Plus vtx indices times length
-    vadd    $v3, $v3, vTRC_1000  // increment by 8 verts = 16
-    addi    $2, $2, 0x10
-    bne     $2, $3, @@loop2
-     sqv    $v4[0], (-0x10)($2)
     jr      $ra                  // Delay slot is harmless
 clip_w:
      vcopy  cBaseF, cPosOnOfF    // Result is just W
@@ -2190,6 +2164,14 @@ ovl3_padded_end:
 
 .orga max(max(ovl2_padded_end - ovl2_start, ovl4_padded_end - ovl4_start) + orga(ovl3_start), orga())
 ovl234_end:
+
+tri_decal_fix_z:
+    // Valid range of tHAtI = 0 to 7FFF, but most of the scene is large values
+    vmudh   $v29, vOne, vTRC_DO  // accum all elems = -DM/2
+    vmadm   $v25, tHAtI, vTRC_DM // elem 7 = (0 to DM/2-1) - DM/2 = -DM/2 to -1
+    vcr     tDaDyI, tDaDyI, $v25[7] // Clamp DzDyI (6) to <= -val or >= val; clobbers DzDyF (7)
+    j       tri_return_from_decal_fix_z
+     set_vcc_11110001 // Clobbered by vcr
 
 // Converts the segmented address in cmd_w1_dram to the corresponding physical address
 segmented_to_physical: // 8
@@ -2912,7 +2894,7 @@ final address is completely wrong. However, DMEM wraps at 4 KiB--only the lowest
 I only noticed this when I tried to move G_RELSEGMENT to a different command
 byte and got crashes. */
 .if (G_RELSEGMENT & 0xF) != (G_MOVEWORD & 0xF)
-.error "Crazy relsegment optimization broken, don't change command byte assignments"
+    .error "Crazy relsegment optimization broken, don't change command byte assignments"
 .endif
 G_RELSEGMENT_handler: // 9
     jal     segmented_to_physical    // Resolve new segment address relative to existing segment
@@ -3015,7 +2997,12 @@ G_SETOTHERMODE_L_handler:
     j       G_RDP_handler
      lpv    $v4[0], (otherMode0)($zero)
 
-displaylist_dma_from_yield:
+G_MODIFYVTX_handler: // 3
+    mfc2    $10, $v7[6]  // Byte 3 = vtx being modified
+    j       do_moveword  // Moveword adds cmd_w0 to $10 for final addr
+     lbu    cmd_w0, (inputBufferEnd - 0x07)(inputBufferPos)  // offset in vtx, bit 15 clear
+
+displaylist_dma_from_yield: // 2
     j       displaylist_dma_goto_next_ra
      lh     nextRA, tempTriRA
 
@@ -3030,18 +3017,6 @@ G_RDPHALF_1_handler: // $ra = ., 0x10 ahead of geometry mode
 .endif
     j       run_next_DL_command
      sw     cmd_w1_dram, (geometryModeLabel - G_GEOMETRYMODE_handler)($ra)
-
-G_RDPHALF_2_handler: // 8; should be after the handlers with alignment needs
-    li      $11, texrectState
-    ldv     $v29[0], (0)($11)
-    sb      $zero, materialCullMode         // This covers tex and fill rects
-    lw      cmd_w0, rdpHalf1Val             // load the RDPHALF1 value into w0
-    addi    rdpCmdBufPtr, rdpCmdBufPtr, 8
-.if !ENABLE_PROFILING
-    addi    perfCounterB, perfCounterB, 1   // Increment number of tex/fill rects
-.endif
-    j       send_w0_w1_to_rdp               // w1 is from the current command
-     sdv    $v29[0], -8(rdpCmdBufPtr)
 
 ovl1_end:
 align_with_warning 8, "One instruction of padding at end of ovl1"
