@@ -722,7 +722,6 @@ clipPolySgn equ (-(0x1000 - clipPoly)) // Underflow DMEM address
 // See rsp_defs.inc about why these are not used and we can reuse them.
 startCounterTime equ (OSTask + OSTask_ucode_size)
 xfrmLookatDirs equ -(0x1000 - (OSTask + OSTask_ucode_data)) // and OSTask_ucode_data_size
-savedOrigV1Addr equ (OSTask + OSTask_data_size)
 dumpDmemBuffer equ (OSTask + OSTask_yield_data_size)
 
 memsetBufferStart equ ((vertexBuffer + 0xF) & 0xFF0)
@@ -1287,31 +1286,47 @@ G_LIGHTTORDP_handler: // 9
      or     cmd_w1_dram, $3, $2          // Combine RGB and alpha in second word
 .endif
 
+align_with_warning 8, "One instruction of padding before tri snake"
+
+.macro snake_c_to_v30
+    lpv     $v30[0], (inputBufferEndSgn)(inputBufferPos) // c to elem 1
+.endmacro
+
 // Index = bits 1-6; direction flag = bit 0; end flag = bit 7
 // CM 02 01 03 04 05 06 07
-//               [bb^cc]   Indices b and c
-//                  |
-//                  cmd_w0 + inputBufferEnd
+//               [bb cc]   Indices b and c
+//                |
+//                inputBufferPos + inputBufferEnd
+// TODO need to save origV1Addr across yield
 tri_snake_ret_from_input_buffer:
+    snake_c_to_v30
     lbu     $3, (inputBufferEnd)(inputBufferPos) // Load c; clear real index b sign bit -> don't exit
     j       tri_snake_loop_from_input_buffer // inputBufferPos pointing to first byte loaded
 G_TRISNAKE_handler:
      li     $ra, tri_snake_loop          // For both init and above (clobbered by DMA).
-    sw      cmd_w0, rdpHalf1Val          // Store indices a, b, c
-    addi    inputBufferPos, inputBufferPos, -6 // Point to byte 2, index b of 1st tri
-    lbu     origV1Addr, rdpHalf1Val + 1   // Initial value, normally carried over
+    lpv     $v30[6], (inputBufferEndSgn - 0x10)(inputBufferPos) // 03 to elem 1; becomes new origV1Addr
+    slv     $v7[4], (rdpHalf1Val - altBase)(altBaseReg) // Store past addrs b, c (01 03)
+    addi    inputBufferPos, inputBufferPos, -6 // Point to byte 2: looks at done flag from 01 and dir flag from 03
+    mfc2    origV1Addr, $v7[2]           // 02; will get stored below as c
 tri_snake_loop:
+    // $v30 elem 1 has new index c, which will become new origV1Addr.
+    // origV1Addr has last one, which gets stored to the V2 or V3 spot.
     lh      $3, (inputBufferEnd)(inputBufferPos) // Load indices b and c
+tri_snake_loop_from_input_buffer:
+    vand    $v6, $v30, vTRC_7E00         // Mask out dir flag and end flag
+    vmudn   $v29, vOne, vTRC_VB          // Address of vertex buffer
     addi    inputBufferPos, inputBufferPos, 1  // Increment indices being read
     beqz    inputBufferPos, tri_snake_over_input_buffer // == 0 at end of input buffer
-tri_snake_loop_from_input_buffer:
      andi   $11, $3, 1                   // Get direction flag from index c
+    vmadl   $v6, $v6, vTRC_VS            // Plus vtx indices times length
     bltz    $3, tri_snake_end            // Upper bit of real index b set = done
-     sb     origV1Addr, (rdpHalf1Val + 2)($11) // Store old v1 as 2 if dir clear or 3 if set
-    andi    origV1Addr, $3, 0x7E          // New v1 = mask out flags from index c
-    sb      origV1Addr, rdpHalf1Val + 1   // Store index c as vertex 1
+     sll    $11, $11, 1                  // Halfword address
+    sh      origV1Addr, (rdpHalf1Val)($11) // Store old v1 as 2 if dir clear or 3 if set
+    llv     $v7[4], (rdpHalf1Val - altBase)(altBaseReg) // Load addresses 2, 3 to elem 2, 3
+    mfc2    origV1Addr, $v6[2]
+    lh      $2, (rdpHalf1Val + 0)($zero)
     j       tri_from_snake          // Repeat next instr so we can skip lbu origV1Addr
-     lpv    $v7[0], (rdpHalf1Val - 4 - altBase)(altBaseReg) // To vector unit in elems 5-7
+     snake_c_to_v30
 
 // H = highest on screen = lowest Y value; then M = mid, L = low
 tHAtF equ $v5
@@ -1327,6 +1342,14 @@ tPosMmH equ $v6
 tPosLmH equ $v8
 tPosHmM equ $v11
 tDaDyI equ $v27
+
+tri_decal_fix_z:
+    // Valid range of tHAtI = 0 to 7FFF, but most of the scene is large values
+    vmudh   $v29, vOne, vTRC_DO  // accum all elems = -DM/2
+    vmadm   $v25, tHAtI, vTRC_DM // elem 7 = (0 to DM/2-1) - DM/2 = -DM/2 to -1
+    vcr     tDaDyI, tDaDyI, $v25[7] // Clamp DzDyI (6) to <= -val or >= val; clobbers DzDyF (7)
+    j       tri_return_from_decal_fix_z
+     set_vcc_11110001 // Clobbered by vcr
 
 align_with_warning 8, "One instruction of padding before tris"
 
@@ -1749,49 +1772,6 @@ flush_rdp_buffer: // Prereq: dmemAddr = rdpCmdBufPtr - rdpCmdBufEndP1, or dmemAd
     j       dma_read_write
      addi   rdpCmdBufPtr, rdpCmdBufEndP1, -(RDP_CMD_BUFSIZE + 8)
 
-align_with_warning 8, "One instruction of padding before tri_alpha_compare_cull"
-
-tri_alpha_compare_cull:
-// Alpha compare culling
-    vge     $v26, tHAtI, tMAtI
-    lbu     $19, alphaCompareCullThresh
-    vlt     $v25, tHAtI, tMAtI
-    bgtz    $11, @@skip1
-     vge    $v26, $v26, tLAtI // If alphaCompareCullMode > 0, $v26 = max of 3 verts
-    vlt     $v26, $v25, tLAtI // else if < 0, $v26 = min of 3 verts
-@@skip1: // $v26 elem 3 has max or min alpha value
-    mfc2    $24, $v26[6]
-    sub     $24, $24, $19 // sign bit set if (max/min) < thresh
-    xor     $24, $24, $11 // invert sign bit if other cond. Sign bit set -> cull,
-    bgez    $24, tri_return_from_alpha_compare_cull // if max < thresh or if min >= thresh.
-tri_culled_by_occlusion_plane:
-.if CFG_PROFILING_B
-     nop
-    addi    perfCounterB, perfCounterB, 0x4000
-.endif
-return_and_end_mat:
-     tri_v1_move // overwrites $v6[1]
-    jr      $ra
-     sb     $zero, materialCullMode // This covers all tri early exits except clipping
-
-tri_snake_over_input_buffer:
-    bgez    $3, displaylist_dma_goto_next_ra // If $3 < 0, last tri flag set, proceed to end
-     li     nextRA, tri_snake_ret_from_input_buffer // inputBufferPos is now 0; load whole buffer
-tri_snake_end:
-    addi    inputBufferPos, inputBufferPos, 7 // Round up to whole input command
-    addi    $11, $zero, 0xFFFFFFF8            // Sign-extend; andi is zero-extend!
-    j       tris_end
-     and    inputBufferPos, inputBufferPos, $11 // inputBufferPos has to be negative
-
-.if !ENABLE_PROFILING
-tri_flat_shading:
-    vlt     $v29, $v31, $v31[3]       // Set vcc to 11100000
-    vmrg    tHAtI, $v25, tHAtI        // RGB from original vtx 1, alpha from $1
-    vmrg    tMAtI, $v25, tMAtI        // RGB from original vtx 1, alpha from $2
-    j       tri_return_from_flat_shading
-     vmrg   tLAtI, $v25, tLAtI        // RGB from original vtx 1, alpha from $3
-.endif
-
 align_with_warning 8, "One instruction of padding before ovl234"
 
 vtx_select_lighting:
@@ -2147,7 +2127,7 @@ clip_err_insert:
 clip_done:    // Delay slot is harmless if branched
      li     $11, CLIP_SCAL_NPXY | CLIP_CAMPLANE
     sh      $11, activeClipPlanes
-    // snake_c_to_v30 TODO
+    snake_c_to_v30
     tri_v1_move
     add     origV1Addr, origV1Addr, flatV1Offset // Real orig addr = cur V1 + offset
     li      flatV1Offset, 0
@@ -2165,24 +2145,28 @@ ovl3_padded_end:
 .orga max(max(ovl2_padded_end - ovl2_start, ovl4_padded_end - ovl4_start) + orga(ovl3_start), orga())
 ovl234_end:
 
-tri_decal_fix_z:
-    // Valid range of tHAtI = 0 to 7FFF, but most of the scene is large values
-    vmudh   $v29, vOne, vTRC_DO  // accum all elems = -DM/2
-    vmadm   $v25, tHAtI, vTRC_DM // elem 7 = (0 to DM/2-1) - DM/2 = -DM/2 to -1
-    vcr     tDaDyI, tDaDyI, $v25[7] // Clamp DzDyI (6) to <= -val or >= val; clobbers DzDyF (7)
-    j       tri_return_from_decal_fix_z
-     set_vcc_11110001 // Clobbered by vcr
-
-// Converts the segmented address in cmd_w1_dram to the corresponding physical address
-segmented_to_physical: // 8
-    srl     $11, cmd_w1_dram, 22          // Copy (segment index << 2) into $11
-    andi    $11, $11, 0x3C                // Clear the bottom 2 bits that remained during the shift
-    vadd    $v8, $v8, $v9[1]              // elem 2 = vertex count * size
-    lw      $11, (segmentTable)($11)      // Get the current address of the segment
-    sll     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address to the left so that the top 8 bits are shifted out
-    srl     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address back to the right, resulting in the original with the top 8 bits cleared
+tri_alpha_compare_cull:
+// Alpha compare culling
+    vge     $v26, tHAtI, tMAtI
+    lbu     $19, alphaCompareCullThresh
+    vlt     $v25, tHAtI, tMAtI
+    bgtz    $11, @@skip1
+     vge    $v26, $v26, tLAtI // If alphaCompareCullMode > 0, $v26 = max of 3 verts
+    vlt     $v26, $v25, tLAtI // else if < 0, $v26 = min of 3 verts
+@@skip1: // $v26 elem 3 has max or min alpha value
+    mfc2    $24, $v26[6]
+    sub     $24, $24, $19 // sign bit set if (max/min) < thresh
+    xor     $24, $24, $11 // invert sign bit if other cond. Sign bit set -> cull,
+    bgez    $24, tri_return_from_alpha_compare_cull // if max < thresh or if min >= thresh.
+tri_culled_by_occlusion_plane:
+.if CFG_PROFILING_B
+     nop
+    addi    perfCounterB, perfCounterB, 0x4000
+.endif
+return_and_end_mat:
+     tri_v1_move // overwrites $v6[1]
     jr      $ra
-     add    cmd_w1_dram, cmd_w1_dram, $11 // Add the segment's address to the masked input address, resulting in the virtual address
+     sb     $zero, materialCullMode // This covers all tri early exits except clipping
 
 vtx_after_dma:
     mfc2    outVtxBase, $v8[6]                 // Address of output start
@@ -2649,6 +2633,35 @@ tris_end:
 .else
     j       run_next_DL_command
      lqv    vTRC, (vTRCValue)($zero)         // Restore value overwritten by matrix
+.endif
+
+// Converts the segmented address in cmd_w1_dram to the corresponding physical address
+segmented_to_physical: // 8
+    srl     $11, cmd_w1_dram, 22          // Copy (segment index << 2) into $11
+    andi    $11, $11, 0x3C                // Clear the bottom 2 bits that remained during the shift
+    vadd    $v8, $v8, $v9[1]              // elem 2 = vertex count * size
+    lw      $11, (segmentTable)($11)      // Get the current address of the segment
+    sll     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address to the left so that the top 8 bits are shifted out
+    srl     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address back to the right, resulting in the original with the top 8 bits cleared
+    jr      $ra
+     add    cmd_w1_dram, cmd_w1_dram, $11 // Add the segment's address to the masked input address, resulting in the virtual address
+
+tri_snake_over_input_buffer:
+    bgez    $3, displaylist_dma_goto_next_ra // If $3 < 0, last tri flag set, proceed to end
+     li     nextRA, tri_snake_ret_from_input_buffer // inputBufferPos is now 0; load whole buffer
+tri_snake_end:
+    addi    inputBufferPos, inputBufferPos, 7 // Round up to whole input command
+    addi    $11, $zero, 0xFFFFFFF8            // Sign-extend; andi is zero-extend!
+    j       tris_end
+     and    inputBufferPos, inputBufferPos, $11 // inputBufferPos has to be negative
+
+.if !ENABLE_PROFILING
+tri_flat_shading:
+    vlt     $v29, $v31, $v31[3]       // Set vcc to 11100000
+    vmrg    tHAtI, $v25, tHAtI        // RGB from original vtx 1, alpha from $1
+    vmrg    tMAtI, $v25, tMAtI        // RGB from original vtx 1, alpha from $2
+    j       tri_return_from_flat_shading
+     vmrg   tLAtI, $v25, tLAtI        // RGB from original vtx 1, alpha from $3
 .endif
 
 .if 0
