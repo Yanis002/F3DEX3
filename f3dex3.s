@@ -655,6 +655,9 @@ vertexBuffer:
 // Space for temporary verts for clipping code, and reused for other things
 clipTempVerts:
 
+yieldOrigV1Addr:
+    .skip 2  // Needs to be saved over yield
+
 // Round up to 0x8
 .org ((clipTempVerts + 0x7) & 0xFF8)
    
@@ -1043,6 +1046,7 @@ start: // This is at IMEM 0x1080, not the start of IMEM
     lw      perfCounterC, yieldDataFooter + YDF_OFFSET_PERFCOUNTERC
     lw      perfCounterD, yieldDataFooter + YDF_OFFSET_PERFCOUNTERD
     lw      taskDataPtr, yieldDataFooter + YDF_OFFSET_TASKDATAPTR
+    lh      origV1Addr, yieldOrigV1Addr
     j       finish_setup
      li     nextRA, displaylist_dma_from_yield
 
@@ -1162,6 +1166,18 @@ load_overlays_0_1:
     li      dmaLen, ovl01_end - 0x1000 - 1
     j       load_overlay_inner
      li     dmemAddr, 0x1000
+
+G_GEOMETRYMODE_handler: // 6
+    lw      $11, geometryModeLabel        // load the geometry mode value
+    and     $11, $11, cmd_w0              // clears the flags in cmd_w0 (set in g*SPClearGeometryMode)
+    or      cmd_w1_dram, cmd_w1_dram, $11 // sets the flags in cmd_w1_dram (set in g*SPSetGeometryMode)
+    srl     vGeomMid, cmd_w1_dram, 8      // Middle 2 bytes of geom mode to lower 16 bits. Ordered this way to avoid stalls.
+G_RDPHALF_1_handler: // $ra = ., 0x10 ahead of geometry mode
+.if (G_RDPHALF_1_handler - G_GEOMETRYMODE_handler) != (rdpHalf1Val - geometryModeLabel)
+    .error "G_RDPHALF_1 optimization broken"
+.endif
+    j       run_next_DL_command
+     sw     cmd_w1_dram, (geometryModeLabel - G_GEOMETRYMODE_handler)($ra)
 
 G_RDPHALF_2_handler: // 8; should be after the handlers with alignment needs
     li      $11, texrectState
@@ -1289,7 +1305,7 @@ G_LIGHTTORDP_handler: // 9
 align_with_warning 8, "One instruction of padding before tri snake"
 
 .macro snake_c_to_v30
-    lpv     $v30[0], (inputBufferEndSgn)(inputBufferPos) // c to elem 1
+    lpv     $v30[1], (inputBufferEndSgn)(inputBufferPos) // c (pos+1) to elem 2
 .endmacro
 
 // Index = bits 1-6; direction flag = bit 0; end flag = bit 7
@@ -1297,25 +1313,25 @@ align_with_warning 8, "One instruction of padding before tri snake"
 //               [bb cc]   Indices b and c
 //                |
 //                inputBufferPos + inputBufferEnd
-// TODO need to save origV1Addr across yield
 tri_snake_ret_from_input_buffer:
-    snake_c_to_v30
+    lpv     $v30[2], (inputBufferEndSgn)(inputBufferPos) // c (pos+0) to elem 2
     lbu     $3, (inputBufferEnd)(inputBufferPos) // Load c; clear real index b sign bit -> don't exit
+    vand    $v6, $v30, vTRC_7E00         // Mask out dir flag and end flag
     j       tri_snake_loop_from_input_buffer // inputBufferPos pointing to first byte loaded
 G_TRISNAKE_handler:
      li     $ra, tri_snake_loop          // For both init and above (clobbered by DMA).
-    lpv     $v30[6], (inputBufferEndSgn - 0x10)(inputBufferPos) // 03 to elem 1; becomes new origV1Addr
+    lpv     $v30[7], (inputBufferEndSgn - 0x10)(inputBufferPos) // 03 to elem 2; becomes new origV1Addr
     slv     $v7[4], (rdpHalf1Val - altBase)(altBaseReg) // Store past addrs b, c (01 03)
     addi    inputBufferPos, inputBufferPos, -6 // Point to byte 2: looks at done flag from 01 and dir flag from 03
     mfc2    origV1Addr, $v7[2]           // 02; will get stored below as c
 tri_snake_loop:
-    // $v30 elem 1 has new index c, which will become new origV1Addr.
+    // $v30 elem 2 has new index c, which will become new origV1Addr.
     // origV1Addr has last one, which gets stored to the V2 or V3 spot.
     lh      $3, (inputBufferEnd)(inputBufferPos) // Load indices b and c
-tri_snake_loop_from_input_buffer:
     vand    $v6, $v30, vTRC_7E00         // Mask out dir flag and end flag
-    vmudn   $v29, vOne, vTRC_VB          // Address of vertex buffer
     addi    inputBufferPos, inputBufferPos, 1  // Increment indices being read
+tri_snake_loop_from_input_buffer:
+    vmudn   $v29, vOne, vTRC_VB          // Address of vertex buffer
     beqz    inputBufferPos, tri_snake_over_input_buffer // == 0 at end of input buffer
      andi   $11, $3, 1                   // Get direction flag from index c
     vmadl   $v6, $v6, vTRC_VS            // Plus vtx indices times length
@@ -1323,7 +1339,7 @@ tri_snake_loop_from_input_buffer:
      sll    $11, $11, 1                  // Halfword address
     sh      origV1Addr, (rdpHalf1Val)($11) // Store old v1 as 2 if dir clear or 3 if set
     llv     $v7[4], (rdpHalf1Val - altBase)(altBaseReg) // Load addresses 2, 3 to elem 2, 3
-    mfc2    origV1Addr, $v6[2]
+    mfc2    origV1Addr, $v6[4]           // In elem 2 (not elem 1 like 1tri)
     lh      $2, (rdpHalf1Val + 0)($zero)
     j       tri_from_snake          // Repeat next instr so we can skip lbu origV1Addr
      snake_c_to_v30
@@ -2635,17 +2651,6 @@ tris_end:
      lqv    vTRC, (vTRCValue)($zero)         // Restore value overwritten by matrix
 .endif
 
-// Converts the segmented address in cmd_w1_dram to the corresponding physical address
-segmented_to_physical: // 8
-    srl     $11, cmd_w1_dram, 22          // Copy (segment index << 2) into $11
-    andi    $11, $11, 0x3C                // Clear the bottom 2 bits that remained during the shift
-    vadd    $v8, $v8, $v9[1]              // elem 2 = vertex count * size
-    lw      $11, (segmentTable)($11)      // Get the current address of the segment
-    sll     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address to the left so that the top 8 bits are shifted out
-    srl     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address back to the right, resulting in the original with the top 8 bits cleared
-    jr      $ra
-     add    cmd_w1_dram, cmd_w1_dram, $11 // Add the segment's address to the masked input address, resulting in the virtual address
-
 tri_snake_over_input_buffer:
     bgez    $3, displaylist_dma_goto_next_ra // If $3 < 0, last tri flag set, proceed to end
      li     nextRA, tri_snake_ret_from_input_buffer // inputBufferPos is now 0; load whole buffer
@@ -2823,6 +2828,7 @@ task_done_or_yield:
     beqz    $7, task_done           // see above
      sw     perfCounterD, yieldDataFooter + YDF_OFFSET_PERFCOUNTERD
 task_yield: // Otherwise CPU requested yield
+    sh      origV1Addr, yieldOrigV1Addr
     lw      $11, OSTask + OSTask_ucode         // Save pointer to current ucode
     lw      cmd_w1_dram, OSTask + OSTask_yield_data_ptr
     li      dmemAddr, -0x8000                  // 0, but negative = write
@@ -3019,17 +3025,16 @@ displaylist_dma_from_yield: // 2
     j       displaylist_dma_goto_next_ra
      lh     nextRA, tempTriRA
 
-G_GEOMETRYMODE_handler: // 6
-    lw      $11, geometryModeLabel        // load the geometry mode value
-    and     $11, $11, cmd_w0              // clears the flags in cmd_w0 (set in g*SPClearGeometryMode)
-    or      cmd_w1_dram, cmd_w1_dram, $11 // sets the flags in cmd_w1_dram (set in g*SPSetGeometryMode)
-    srl     vGeomMid, cmd_w1_dram, 8      // Middle 2 bytes of geom mode to lower 16 bits. Ordered this way to avoid stalls.
-G_RDPHALF_1_handler: // $ra = ., 0x10 ahead of geometry mode
-.if (G_RDPHALF_1_handler - G_GEOMETRYMODE_handler) != (rdpHalf1Val - geometryModeLabel)
-    .error "G_RDPHALF_1 optimization broken"
-.endif
-    j       run_next_DL_command
-     sw     cmd_w1_dram, (geometryModeLabel - G_GEOMETRYMODE_handler)($ra)
+// Converts the segmented address in cmd_w1_dram to the corresponding physical address
+segmented_to_physical: // 8
+    srl     $11, cmd_w1_dram, 22          // Copy (segment index << 2) into $11
+    andi    $11, $11, 0x3C                // Clear the bottom 2 bits that remained during the shift
+    vadd    $v8, $v8, $v9[1]              // elem 2 = vertex count * size
+    lw      $11, (segmentTable)($11)      // Get the current address of the segment
+    sll     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address to the left so that the top 8 bits are shifted out
+    srl     cmd_w1_dram, cmd_w1_dram, 8   // Shift the address back to the right, resulting in the original with the top 8 bits cleared
+    jr      $ra
+     add    cmd_w1_dram, cmd_w1_dram, $11 // Add the segment's address to the masked input address, resulting in the virtual address
 
 ovl1_end:
 align_with_warning 8, "One instruction of padding at end of ovl1"
