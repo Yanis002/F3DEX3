@@ -147,19 +147,20 @@ This is still an unlikely case though:
 this is probably poorly optimized to begin with.
 - When the FIFO fills up, this means wasted RSP time, even if this happens not
 to conflict with a yield. If the FIFO fills up often and RSP peformance is
-imporant in your game (either for audio or because the graphics are RSP bound),
+important in your game (either for audio or because the graphics are RSP bound),
 you should expand the FIFO.
 - A snake this long is rare in typical low-poly N64 meshes. And, the export tool
 could limit the maximum snake length generated.
 
-A future version of F3DEX3 could allow the snake command to yield in the middle.
-This has not been implemented yet because it is very difficult to validate.
-Yields are rare relative to display list commands (typically 1-2 of the former
-and many thousands of the latter per frame). And, until we have a robust F3DEX3
-mesh optimizer and a game where most things are drawn with snakes (i.e. few
-vanilla assets left), snakes will also be rare in the display list. So it will
-be hard to know whether the yield-during-snake codepath is even being run, let
-alone whether it is correct in all cases.
+F3DEX3 now checks for yields whenever the input buffer is refilled, not before
+every command as in F3DEX2. When a triangle snake extends across the boundary of
+the input buffer, a yield can occur, and F3DEX3 correctly suspends and resumes
+the triangle snake in this case. So, while triangle snakes can be unlimited in
+length, because the input buffer is 21 commands = 168 bytes, there is guaranteed
+to be a yield check at least once every 168 triangles. (Any snake of 8 tris or
+more can potentially cross the input buffer end and therefore be interrupted.)
+This guarantee does not help practically though, as practically snakes will not
+be more than about 110 tris due to the vertex buffer size.
 
 ## Comparison with Tiny3D
 

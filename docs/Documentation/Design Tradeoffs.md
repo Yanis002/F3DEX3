@@ -17,7 +17,7 @@ faster overall. Plus, RSP time is also saved for the tris which are not drawn,
 which can approximately cancel out the extra RSP time for computing the
 occlusion plane for all vertices.
 
-## Functionality in Overlay 3
+## Functionality in overlays
 
 The following commands are moved to Overlay 2 or 3 in F3DEX3 to save IMEM space.
 This means that code will have to be loaded from DRAM to run them if a different
@@ -123,6 +123,20 @@ and F3DEX3 is faster at drawing textured tris than F3DEX2. Plus, F3DEX3 still
 does not send the texture cofficients if they are disabled, saving DRAM access
 time for RSP -> FIFO and FIFO -> RDP. RDP time savings from avoiding loading a
 texture are unaffected of course. 
+
+## Yield check timing
+
+In F3DEX2, the microcode checks whether the CPU has requested that it yield (to
+run the audio microcode) before running every display list command. F3DEX3 now
+performs this check every time the input buffer is refilled, which is typically
+once every 21 commands. The amount by which this delays the start of the audio
+microcode is typically very small, and worst case during normal conditions would
+be a few hundred microseconds. However, if the RDP FIFO is full during this
+time, the microcode will have to wait for the RDP to make progress through its
+workload to free up space for the outputs of the RSP commands. This will slow
+down the RSP to the RDP's speed, and since triangles can be arbitrarily large
+on screen, this can theoretically cause huge stalls. If you ever encounter this
+in practice, please contact Sauraen.
 
 ## Obscure semantic differences from F3DEX2 that should never matter in practice
 

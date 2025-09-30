@@ -1412,7 +1412,7 @@ tri_from_clip:
     and     $11, $11, $8
     vmrg    tHPos, $v6, $v4   // v14 = v1.y < v2.y ? v1 : v2 (lower vertex of v1, v2)
     bnez    $11, return_and_end_mat // Then the whole tri is offscreen, cull
-     // 21 cycles (for tri2 first tri; tri1/only subtract 1 from counts)
+     // 16 cycles (for tri2 first tri; tri1/only subtract 1 from counts)
      vmudh  $v29, $v10, $v12[1] // x = (v1 - v2).x * (v1 - v3).y ... 
     vmadh   $v26, $v12, $v11[1] // ... + (v1 - v3).x * (v2 - v1).y = cross product = dir tri is facing
     lhu     $24, activeClipPlanes
@@ -1428,18 +1428,18 @@ tri_from_clip:
     and     $10, $10, $24     // If clipping is enabled, check clip flags
     vlt     $v29, $v6, $v2    // VCO = max(vert1.y, vert2.y, vert3.y) < max(vert1.y, vert2.y)
     bnez    $10, ovl234_clipmisc_entrypoint // Facing info and occlusion may be garbage if need to clip
-     // 29 cycles
+     // 24 cycles
      srl    $11, $9, 31       // = 0 if x prod positive (back facing), 1 if x prod negative (front facing)
     vmudh   $v3, vOne, $v31[5] // 0x4000; some rounding factor
     sllv    $11, $20, $11     // Sign bit = bit 10 of geom mode if back facing, bit 9 if front facing
     vmrg    tMPos, $v4, tLPos // v2 = max(vert1.y, vert2.y, vert3.y) < max(vert1.y, vert2.y) : highest(vert1, vert2, vert3) ? highest(vert1, vert2)
     bltz    $11, return_and_end_mat // Cull if bit is set (culled based on facing)
-     // 32 cycles
+     // 27 cycles
      vmrg   tLPos, tLPos, $v4 // v10 = max(vert1.y, vert2.y, vert3.y) < max(vert1.y, vert2.y) : highest(vert1, vert2) ? highest(vert1, vert2, vert3)
 tSubPxHF equ $v4
     vmudn   tSubPxHF, tHPos, $v31[5] // 0x4000
     beqz    $9, return_and_end_mat  // If cross product is 0, tri is degenerate (zero area), cull.
-     // 34 cycles
+     // 29 cycles
 .if !CFG_NO_OCCLUSION_PLANE
      and    $6, $6, $7
 .endif
@@ -1454,10 +1454,10 @@ tSubPxHF equ $v4
     vsub    tPosHmM, tHPos, tMPos
 .if !CFG_NO_OCCLUSION_PLANE
     bnez    $6, tri_culled_by_occlusion_plane // Cull if all verts occluded
-     // 38 cycles
+     // 33 cycles
 .endif
      mfc2   $1, tHPos[4]     // tHPos = lowest Y value = highest on screen (x, y, addr)
-    // 37 cycles if NOC (39 if occlusion plane)
+    // 32 cycles if NOC (34 if occlusion plane)
 tPosCatI equ $v15 // 0 X L-M; 1 Y L-M; 2 X M-H; 3 X L-H; 4-7 garbage
     vsub    tPosCatI, tLPos, tMPos
     mfc2    $2, tMPos[4]     // tMPos = mid vertex (x, y, addr)
@@ -1492,7 +1492,7 @@ tXPRcpI equ $v24
 .endif
      vrcph  tXPRcpI[1], $v31[2]            // 0
 tri_return_from_flat_shading:
-    // 44 cycles
+    // 43 cycles
     vrcp    $v20[2], tPosMmH[1]
     ssv     tPosMmH[2], 0x0030(rdpCmdBufPtr) // MmHY -> first short (temp mem)
     vrcph   $v22[2], tPosMmH[1]
@@ -1514,7 +1514,7 @@ tri_return_from_flat_shading:
      vmadn  $v20, $v31, $v31[2] // 0
 // $v6 <- tPosMmH; $v6 clobbered in alpha compare cull
 tri_return_from_alpha_compare_cull: // Uses $v25, $v26
-    // 60 cycles
+    // 53 cycles
 tPosCatF equ $v25
     vmudm   tPosCatF, tPosCatI, vTRC_1000
     mtc2    $20, tMPos[14] // 0xFFF8; only elem 0, 1, 2 of this reg used now
@@ -1615,7 +1615,7 @@ tSTWHMF equ $v25 // <- tMnWI
 .if !ENABLE_PROFILING
     addi    perfCounterA, perfCounterA, 1 // Increment number of tris sent to RDP
 .endif
-    // 103 cycles
+    // 96 cycles
     vmudl   $v29, tXPF, tXPRcpF
     lsv     tHAtF[14], VTX_SCR_Z_FRAC($1)
     vmadm   $v29, tXPI, tXPRcpF
@@ -1688,7 +1688,7 @@ tDaDyF equ $v6
 // DaDe = DaDx * factor
 tDaDeF equ $v8
 tDaDeI equ $v9
-    // 132 cycles
+    // 125 cycles
     vmadl   $v29, tDaDxF, $v20[3]
     sdv     tDaDxF[8], 0x0018($1)   // Store DsDx, DtDx, DwDx texture coefficients (fractional)
     vmadm   $v29, tDaDxI, $v20[3]
@@ -1713,7 +1713,7 @@ tDaDeI equ $v9
     // All values start in element 7. "a", attribute, is Z. Need
     // tHAtI, tHAtF, tDaDxI, tDaDxF, tDaDeI, tDaDeF, tDaDyI, tDaDyF
     // VCC is still 11110001
-    // 145 cycles
+    // 135 cycles
     vmrg    tDaDyI, tDaDyF, tDaDyI[7] // Elems 6-7: DzDyI:F
     beqz    $19, tri_decal_fix_z
      vmrg   tDaDxI, tDaDxF, tDaDxI[7] // Elems 6-7: DzDxI:F
@@ -1730,7 +1730,7 @@ tri_return_from_decal_fix_z:
     slv     tDaDeI[12], 0x08($10)  // DzDeI:F
     bltz    dmemAddr, return_and_end_mat     // Return if rdpCmdBufPtr < end+1 i.e. ptr <= end
      slv    $v10[12], 0x00($10)   // ZI:F
-     // 153 cycles
+     // 146 cycles
 flush_rdp_buffer: // Prereq: dmemAddr = rdpCmdBufPtr - rdpCmdBufEndP1, or dmemAddr = large neg num -> only wait and set DPC_END
     mfc0    $11, SP_DMA_BUSY                 // Check if any DMA is in flight
     lw      cmd_w1_dram, rdpFifoPos          // FIFO pointer = end of RDP read, start of RSP write
