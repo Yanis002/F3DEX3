@@ -117,7 +117,7 @@ all at the same time!
   further RSP processing.
 - The key codepaths for command dispatch, triangle draw, and vertex processing
   (assuming lighting enabled and the occlusion plane disabled with the `NOC`
-  configuration) are **slightly faster than in F3DEX2**.
+  configuration) are **faster than in F3DEX2**, sometimes [much faster](https://hackern64.github.io/F3DEX3/performance.html).
 
 ### Miscellaneous
 
