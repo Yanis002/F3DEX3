@@ -1042,6 +1042,11 @@ start: // This is at IMEM 0x1080, not the start of IMEM
     lw      perfCounterB, yieldDataFooter + YDF_OFFSET_PERFCOUNTERB
     lw      perfCounterC, yieldDataFooter + YDF_OFFSET_PERFCOUNTERC
     lw      perfCounterD, yieldDataFooter + YDF_OFFSET_PERFCOUNTERD
+.if CFG_PROFILING_A
+    mfc0    $10, DPC_CLOCK // Start tri profiling again in case we came from snake
+    sw      perfCounterC, startFifoStallTime   // Save initial FIFO stall time
+    sw      $10, startCounterTime
+.endif
     lw      taskDataPtr, yieldDataFooter + YDF_OFFSET_TASKDATAPTR
     lh      origV1Addr, yieldOrigV1Addr
     j       finish_setup
@@ -2637,20 +2642,20 @@ tris_end:
     sub     $11, $11, $10
     beqz    $ra, run_next_DL_command         // $ra != 0 if from tri cmds
      add    perfCounterA, perfCounterA, $11  // Add to vert cycles perf counter
-    lw      $10, startFifoStallTime          // From tris
+    lw      $2, startFifoStallTime           // From tris
     sub     perfCounterA, perfCounterA, $11  // Undo add to vert perf counter
     add     perfCounterD, perfCounterD, $11  // Add to tri cycles perf counter
-    sub     $10, perfCounterC, $10           // RDP FIFO stall time elapsed during tri draw
+    sub     $2, perfCounterC, $2             // RDP FIFO stall time elapsed during tri draw
     j       run_next_DL_command
-     sub    perfCounterD, perfCounterD, $10  // Subtract final RDP FIFO stall time from tri time
+     sub    perfCounterD, perfCounterD, $2   // Subtract final RDP FIFO stall time from tri time
 .else
     j       run_next_DL_command
      lqv    vTRC, (vTRCValue)($zero)         // Restore value overwritten by matrix
 .endif
 
-tri_snake_over_input_buffer:
+tri_snake_over_input_buffer: // inputBufferPos is now 0; load whole buffer
     bgez    $3, displaylist_dma_goto_next_ra // If $3 < 0, last tri flag set, proceed to end
-     li     nextRA, tri_snake_ret_from_input_buffer // inputBufferPos is now 0; load whole buffer
+     li     nextRA, -0x8000 | tri_snake_ret_from_input_buffer // Negative is flag for from snake
 tri_snake_end:
     addi    inputBufferPos, inputBufferPos, 7 // Round up to whole input command
     addi    $11, $zero, 0xFFFFFFF8            // Sign-extend; andi is zero-extend!
@@ -2826,13 +2831,30 @@ task_done_or_yield:
      sw     perfCounterD, yieldDataFooter + YDF_OFFSET_PERFCOUNTERD
 task_yield: // Otherwise CPU requested yield
     sh      origV1Addr, yieldOrigV1Addr
-    lw      $11, OSTask + OSTask_ucode         // Save pointer to current ucode
+.if CFG_PROFILING_A
+    lh      $2, tempTriRA
+.endif
+    lw      $3, OSTask + OSTask_ucode          // Save pointer to current ucode
     lw      cmd_w1_dram, OSTask + OSTask_yield_data_ptr
-    li      dmemAddr, -0x8000                  // 0, but negative = write
+.if CFG_PROFILING_A
+    bgez    $2, @@not_snake                    // Snake next RA is negative
+.endif
+     li     dmemAddr, -0x8000                  // 0, but negative = write
+.if CFG_PROFILING_A
+    mfc0    $11, DPC_CLOCK                     // Finish tri perf counting
+    lw      $10, startCounterTime
+    lw      $2, startFifoStallTime
+    sub     $11, $11, $10
+    add     perfCounterD, perfCounterD, $11  // Add to tri cycles perf counter
+    sub     $2, perfCounterC, $2             // RDP FIFO stall time elapsed during tri draw
+    sub     perfCounterD, perfCounterD, $2   // Subtract final RDP FIFO stall time from tri time
+    sw      perfCounterD, yieldDataFooter + YDF_OFFSET_PERFCOUNTERD // Was stored above, but have modified
+@@not_snake:
+.endif
     li      dmaLen, OS_YIELD_DATA_SIZE - 1
     li      $10, SP_SET_SIG1 | SP_SET_SIG2     // yielded and task done signals
     sw      taskDataPtr, yieldDataFooter + YDF_OFFSET_TASKDATAPTR // Save pointer to where in DL
-    sw      $11, yieldDataFooter + YDF_OFFSET_UCODE
+    sw      $3, yieldDataFooter + YDF_OFFSET_UCODE
     j       dma_read_write
      li     $ra, set_status_and_break
 
