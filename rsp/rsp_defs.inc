@@ -16,7 +16,7 @@ OSTask_flags            equ 0x0004 // see note below                     |
 OSTask_ucode_boot       equ 0x0008 //                                    |
 OSTask_ucode_boot_size  equ 0x000C //                                    v
 OSTask_ucode            equ 0x0010 // used in F3D, S2D, and boot
-OSTask_ucode_size       equ 0x0014 //                      EX3: startCounterTime
+OSTask_ucode_size       equ 0x0014 //                      EX3: startCounterTime (CFG_PROFILING_A and C only)
 OSTask_ucode_data       equ 0x0018 // used in boot only.   EX3: xfrmLookatDirs ^
 OSTask_ucode_data_size  equ 0x001C // used in boot only                        v
 OSTask_dram_stack       equ 0x0020 // used in F3D and S2D
@@ -26,7 +26,7 @@ OSTask_output_buff_size equ 0x002C // used in F3D and S2D; actually end pointer 
 OSTask_data_ptr         equ 0x0030 // used in F3D and S2D
 OSTask_data_size        equ 0x0034 //                      EX3: 2 bytes: savedOrigV1Addr
 OSTask_yield_data_ptr   equ 0x0038 // used in F3D and S2D
-OSTask_yield_data_size  equ 0x003C //                      EX3: dumpDmemBuffer (CFG_PROFILING_B only)
+OSTask_yield_data_size  equ 0x003C //                      EX3: dumpDmemBuffer (CFG_PROFILING_B only), startFifoStallTime (CFG_PROFILING_A only)
 // Unlabeled members are never used. In particular, boot does NOT use OSTask_ucode_size,
 // it always fills all of IMEM after start.
 // A hypothetical other microcode could use OSTask_dram_stack_size or OSTask_data_size

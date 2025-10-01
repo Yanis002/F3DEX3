@@ -82,7 +82,6 @@ ACC_LOWER equ 2
 .endif
 ENABLE_PROFILING equ 1
 COUNTER_A_UPPER_VERTEX_COUNT equ 0
-COUNTER_B_LOWER_CMD_COUNT equ 1
 COUNTER_C_FIFO_FULL equ 1
 
 // Profiling Configuration B
@@ -104,7 +103,6 @@ COUNTER_C_FIFO_FULL equ 1
 .endif
 ENABLE_PROFILING equ 1
 COUNTER_A_UPPER_VERTEX_COUNT equ 1
-COUNTER_B_LOWER_CMD_COUNT equ 0
 COUNTER_C_FIFO_FULL equ 0
 
 // Profiling Configuration C
@@ -121,7 +119,6 @@ COUNTER_C_FIFO_FULL equ 0
 .elseif CFG_PROFILING_C
 ENABLE_PROFILING equ 1
 COUNTER_A_UPPER_VERTEX_COUNT equ 0
-COUNTER_B_LOWER_CMD_COUNT equ 1
 COUNTER_C_FIFO_FULL equ 0
 
 // Default (extra profiling disabled)
@@ -138,7 +135,6 @@ COUNTER_C_FIFO_FULL equ 0
 .else
 ENABLE_PROFILING equ 0
 COUNTER_A_UPPER_VERTEX_COUNT equ 1
-COUNTER_B_LOWER_CMD_COUNT equ 0
 COUNTER_C_FIFO_FULL equ 1
 
 .endif
@@ -725,7 +721,8 @@ clipPolySgn equ (-(0x1000 - clipPoly)) // Underflow DMEM address
 // See rsp_defs.inc about why these are not used and we can reuse them.
 startCounterTime equ (OSTask + OSTask_ucode_size)
 xfrmLookatDirs equ -(0x1000 - (OSTask + OSTask_ucode_data)) // and OSTask_ucode_data_size
-dumpDmemBuffer equ (OSTask + OSTask_yield_data_size)
+dumpDmemBuffer equ (OSTask + OSTask_yield_data_size) // CFG_PROFILING_B only
+startFifoStallTime equ dumpDmemBuffer // CFG_PROFILING_A only
 
 memsetBufferStart equ ((vertexBuffer + 0xF) & 0xFF0)
 memsetBufferMaxEnd equ (rdpCmdBuffer1 & 0xFF0)
@@ -1241,22 +1238,20 @@ run_next_DL_command:
     lw      cmd_w0, (inputBufferEnd)(inputBufferPos)    // Word 0
     vmudl   $v5, $v4, vTRC_VS                           // Vtx indices times length
     lw      cmd_w1_dram, (inputBufferEnd + 4)(inputBufferPos) // Word 1
+.if CFG_PROFILING_C
+    mfc0    $10, DPC_STATUS
+.endif
     vmadn   $v7, vOne, vTRC_VB                          // Plus address of vertex buffer
     sll     $ra, $ra, 2                                 // Convert to a number of instructions
 .if CFG_PROFILING_C
-    mfc0    $10, DPC_STATUS
+    addi    perfCounterB, perfCounterB, 1               // Count commands
     andi    $10, $10, DPC_STATUS_GCLK_ALIVE             // Sample whether GCLK is active now
     sll     $10, $10, 16 - 3                            // move from bit 3 to bit 16
     add     perfCounterB, perfCounterB, $10             // Add to the perf counter
-.endif
-.if CFG_PROFILING_A
+.elseif CFG_PROFILING_A
     mfc0    $10, DPC_CLOCK
-.endif
-.if COUNTER_B_LOWER_CMD_COUNT  // A or C
+    sw      perfCounterC, startFifoStallTime            // Save initial FIFO stall time
     addi    perfCounterB, perfCounterB, 1               // Count commands
-.endif
-.if CFG_PROFILING_A
-    add     perfCounterD, perfCounterD, perfCounterC    // Add initial FIFO stall time to tri time; will subtract final FIFO time later
     sw      $10, startCounterTime
 .endif
     vmadl   $v6, $v31, $v31[2]                          // 0; copy in v6
@@ -2642,10 +2637,12 @@ tris_end:
     sub     $11, $11, $10
     beqz    $ra, run_next_DL_command         // $ra != 0 if from tri cmds
      add    perfCounterA, perfCounterA, $11  // Add to vert cycles perf counter
-    sub     perfCounterA, perfCounterA, $11  // From tris, undo add to vert perf counter
+    lw      $10, startFifoStallTime          // From tris
+    sub     perfCounterA, perfCounterA, $11  // Undo add to vert perf counter
     add     perfCounterD, perfCounterD, $11  // Add to tri cycles perf counter
+    sub     $10, perfCounterC, $10           // RDP FIFO stall time elapsed during tri draw
     j       run_next_DL_command
-     sub    perfCounterD, perfCounterD, perfCounterC // Subtract final RDP FIFO stall time; ends up subtracting any FIFO stall time during these tris
+     sub    perfCounterD, perfCounterD, $10  // Subtract final RDP FIFO stall time from tri time
 .else
     j       run_next_DL_command
      lqv    vTRC, (vTRCValue)($zero)         // Restore value overwritten by matrix
