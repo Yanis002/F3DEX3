@@ -93,7 +93,7 @@ void ClipToScreenSpace(PlayState* play, const Vec3f* clipXYZ, float clipW, Vec2f
     float preViewportY = clipXYZ->y * invW;
     Vp* vp = &play->view.vp;
     screen->x =  (float)vp->vp.vscale[0] * preViewportX + (float)vp->vp.vtrans[0];
-    screen->y = -(float)vp->vp.vscale[1] * preViewportY + (float)vp->vp.vtrans[1];
+    screen->y =  (float)vp->vp.vscale[1] * preViewportY + (float)vp->vp.vtrans[1];
 }
 
 bool ClipPolygon(PlayState* play, ClipVertex* verts, s8* indices, s8** idxFinalStart, s8** idxFinalEnd){
@@ -224,7 +224,7 @@ static OcclusionPlane sNoOcclusionPlane = {
     0x0000,
     0x0000,
     0x0000,
-    0x8000
+    0x7FFF
 };
 
 OcclusionPlane* ComputeOcclusionPlane(PlayState* play, Vec3f* worldBounds){
@@ -248,7 +248,7 @@ OcclusionPlane* ComputeOcclusionPlane(PlayState* play, Vec3f* worldBounds){
     s16 kx = FloatMinus1To1ToS16(kxf);
     s16 ky = FloatMinus1To1ToS16(kyf);
     s16 kz = FloatMinus1To1ToS16(kzf);
-    s16 kc = (s16)(kcf * 0.5f);
+    s16 kc = (s16)(kcf * -0.5f);
     if((kx | ky | kz) == 0){
         // Degenerate plane, disable the clipping
         //sprintf(occPlaneMessage, "Clip space degenerate");

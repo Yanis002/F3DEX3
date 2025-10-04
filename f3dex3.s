@@ -344,37 +344,16 @@ ltBufOfs equ (lightBufferMain - altBase)
 
 occlusionPlaneEdgeCoeffs:
 /*
-NOTE: This explanation is outdated; see cpu/occlusionplane.c
+See cpu/occlusionplane.c for more information.
 Vertex is in occlusion region if all five equations below are true:
 4 * screenX[s13.2] * c0[s0.15] - 0.5 * screenY[s13.2] < c4[s14.1]
 4 * screenY[s13.2] * c1[s0.15] - 0.5 * screenX[s13.2] < c5[s14.1]
 4 * screenX[s13.2] * c2[s0.15] + 0.5 * screenY[s13.2] < c6[s14.1]
 4 * screenY[s13.2] * c3[s0.15] + 0.5 * screenX[s13.2] < c7[s14.1]
-      clamp_to_0.s15(clipX[s15.16] * kx[0.s15])
-    + clamp_to_0.s15(clipY[s15.16] * ky[0.s15])
-    + clamp_to_0.s15(clipZ[s15.16] * kz[0.s15])
-    + kc[0.s15]
-    >= 0
-The first four can be rewritten as (again, vertex is occluded if all are true):
-screenY > screenX *  8*c0 + -2*c4
-screenX > screenY *  8*c1 + -2*c5
-screenY < screenX * -8*c2 +  2*c6
-screenX < screenY * -8*c3 +  2*c7
-where screenX and screenY are in subpixels (e.g. screenX = 100 = 25.0 pixels),
-c0-c3 are shorts representing -1:0.99997,
-and c4-c7 are shorts representing "half pixels" (e.g. c4 = 50 = 25.0 pixels)
-
-For the last equation, one option is to think of kx through kc as in s10.5 mode
-instead, so a value of 0x0020 is 1.0 and they can range from -0x400.00 to
-0x3FF.F8. This choice is because clipZ ranges from 0x0000.0000 at the camera
-plane to 0x03FF.0000 at the maximum distance away. The normal distance Adult
-Link is from the camera is about 0x00B0.0000.
-
-A better option is to develop your plane equation in floating point, e.g.
-clipX[f] * -0.2f + clipY[f] * 0.4f + clipZ[f] * 1.0f + -200.0f >= 0
-then multiply everything by (32768.0f / max(abs(kx), abs(ky), abs(kz), abs(kc)))
-(here 32768.0f / 200.0f = 163.84f)
-clipX[f] * -32.77f + clipY[f] * 65.54f + clipZ[f] * 163.84f + -32768
+      clamp_to_0.s15(clipX[s15.16] * kx[s0.15])
+    + clamp_to_0.s15(clipY[s15.16] * ky[s0.15])
+    + clamp_to_0.s15(clipZ[s15.16] * kz[s0.15])
+    >= kc[s0.15]
 */
     .dh 0x0000 // c0
     .dh 0x0000 // c1
@@ -388,7 +367,7 @@ occlusionPlaneMidCoeffs:
     .dh 0x0000 // kx
     .dh 0x0000 // ky
     .dh 0x0000 // kz
-    .dh 0x8000 // kc
+    .dh 0x7FFF // kc
 
 // Alternate base address because vector load offsets can't reach all of DMEM.
 // altBaseReg permanently points here.
