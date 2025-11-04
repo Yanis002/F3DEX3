@@ -103,47 +103,47 @@ $(function(){initNavTree('performance.html',''); initResizable(true); });
   <div class="headertitle"><div class="title">Performance Results</div></div>
 </div><!--header-->
 <div class="contents">
-<div class="textblock"><h1><a class="anchor" id="autotoc_md37"></a>
+<div class="textblock"><h1><a class="anchor" id="autotoc_md38"></a>
 Performance Results</h1>
 <p>F3DEX3_NOC matches or beats the RSP performance of F3DEX2 on <b>all</b> critical paths in the microcode, including command dispatch, vertex processing, and triangle processing. Then, the RDP and memory traffic performance improvements of F3DEX3&ndash;56 vertex buffer, auto-batched rendering, etc.&ndash;should further improve overall game performance from there.</p>
-<h2><a class="anchor" id="autotoc_md38"></a>
+<h2><a class="anchor" id="autotoc_md39"></a>
 Cycle Counts</h2>
-<p>These are cycle counts for many key paths in the microcode. Lower numbers are better. The timings are hand-counted taking into account all pipeline stalls and all dual-issue conditions. Instruction alignment after branches is usually taken into account, but in some cases it is assumed to be optimal.</p>
-<p>All numbers assume default profiling configuration. <a class="el" href="structTri.html">Tri</a> numbers assume texture, shade, and Z, and not flushing the buffer. <a class="el" href="structTri.html">Tri</a> numbers are measured from the first cycle of the command handler inclusive, to the first cycle of whatever is after $ra exclusive; this is in order to capture the extra latency and stalls in F3DEX2.</p>
+<p>These are cycle counts for many key paths in the microcode. Lower numbers are better. The timings are hand-counted taking into account all pipeline stalls and all dual-issue conditions. Instruction alignment after branches is usually taken into account (especially in F3DEX3), but in some cases it is assumed to be optimal.</p>
+<p>All numbers assume default profiling configuration. <a class="el" href="structTri.html">Tri</a> numbers assume texture, shade, and Z, and not flushing the buffer. <a class="el" href="structTri.html">Tri</a> numbers are measured from the first cycle of the command handler inclusive, to the first cycle of whatever is after $ra exclusive; this is in order to capture an extra stall cycle in F3DEX2 when finishing a triangle and going to the next command.</p>
 <p>Vertex numbers assume no extra F3DEX3 features (packed normals, ambient occlusion, etc.). These features are listed below as the number of extra cycles the feature costs per vertex pair. ltbasic is the codepath when point lighting, specular, and Fresnel are disabled; ltadv is the codepath with any of these enabled. The reason timings are listed separately for each number of lights is because some implementations are pipelined for two lights, so going from an even to an odd number of lights adds a different time than vice versa.</p>
 <table class="markdownTable">
 <tr class="markdownTableHead">
 <th class="markdownTableHeadNone"></th><th class="markdownTableHeadNone">F3DEX2   </th><th class="markdownTableHeadNone">F3DEX3_NOC   </th><th class="markdownTableHeadNone">F3DEX3    </th></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Command dispatch   </td><td class="markdownTableBodyNone">12   </td><td class="markdownTableBodyNone">12   </td><td class="markdownTableBodyNone">12    </td></tr>
+<td class="markdownTableBodyNone">Command dispatch   </td><td class="markdownTableBodyNone">12   </td><td class="markdownTableBodyNone">10   </td><td class="markdownTableBodyNone">10    </td></tr>
 <tr class="markdownTableRowEven">
-<td class="markdownTableBodyNone">Small RDP command   </td><td class="markdownTableBodyNone">14   </td><td class="markdownTableBodyNone">5   </td><td class="markdownTableBodyNone">5    </td></tr>
+<td class="markdownTableBodyNone">Small RDP command   </td><td class="markdownTableBodyNone">14   </td><td class="markdownTableBodyNone">4   </td><td class="markdownTableBodyNone">4    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Only/2nd tri to offscreen   </td><td class="markdownTableBodyNone">27   </td><td class="markdownTableBodyNone">26   </td><td class="markdownTableBodyNone">26    </td></tr>
+<td class="markdownTableBodyNone">Only/2nd tri to offscreen   </td><td class="markdownTableBodyNone">27   </td><td class="markdownTableBodyNone">20   </td><td class="markdownTableBodyNone">20    </td></tr>
 <tr class="markdownTableRowEven">
-<td class="markdownTableBodyNone">1st tri to offscreen   </td><td class="markdownTableBodyNone">28   </td><td class="markdownTableBodyNone">27   </td><td class="markdownTableBodyNone">27    </td></tr>
+<td class="markdownTableBodyNone">1st tri to offscreen   </td><td class="markdownTableBodyNone">28   </td><td class="markdownTableBodyNone">21   </td><td class="markdownTableBodyNone">21    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Only/2nd tri to clip   </td><td class="markdownTableBodyNone">32   </td><td class="markdownTableBodyNone">31   </td><td class="markdownTableBodyNone">31    </td></tr>
+<td class="markdownTableBodyNone">Only/2nd tri to clip   </td><td class="markdownTableBodyNone">32   </td><td class="markdownTableBodyNone">25   </td><td class="markdownTableBodyNone">25    </td></tr>
 <tr class="markdownTableRowEven">
-<td class="markdownTableBodyNone">1st tri to clip   </td><td class="markdownTableBodyNone">33   </td><td class="markdownTableBodyNone">32   </td><td class="markdownTableBodyNone">32    </td></tr>
+<td class="markdownTableBodyNone">1st tri to clip   </td><td class="markdownTableBodyNone">33   </td><td class="markdownTableBodyNone">26   </td><td class="markdownTableBodyNone">26    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Only/2nd tri to backface   </td><td class="markdownTableBodyNone">38   </td><td class="markdownTableBodyNone">38   </td><td class="markdownTableBodyNone">38    </td></tr>
+<td class="markdownTableBodyNone">Only/2nd tri to backface   </td><td class="markdownTableBodyNone">38   </td><td class="markdownTableBodyNone">31   </td><td class="markdownTableBodyNone">31    </td></tr>
 <tr class="markdownTableRowEven">
-<td class="markdownTableBodyNone">1st tri to backface   </td><td class="markdownTableBodyNone">39   </td><td class="markdownTableBodyNone">39   </td><td class="markdownTableBodyNone">39    </td></tr>
+<td class="markdownTableBodyNone">1st tri to backface   </td><td class="markdownTableBodyNone">39   </td><td class="markdownTableBodyNone">32   </td><td class="markdownTableBodyNone">32    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Only/2nd tri to degenerate   </td><td class="markdownTableBodyNone">42   </td><td class="markdownTableBodyNone">40   </td><td class="markdownTableBodyNone">40    </td></tr>
+<td class="markdownTableBodyNone">Only/2nd tri to degenerate   </td><td class="markdownTableBodyNone">42   </td><td class="markdownTableBodyNone">33   </td><td class="markdownTableBodyNone">33    </td></tr>
 <tr class="markdownTableRowEven">
-<td class="markdownTableBodyNone">1st tri to degenerate   </td><td class="markdownTableBodyNone">43   </td><td class="markdownTableBodyNone">41   </td><td class="markdownTableBodyNone">41    </td></tr>
+<td class="markdownTableBodyNone">1st tri to degenerate   </td><td class="markdownTableBodyNone">43   </td><td class="markdownTableBodyNone">34   </td><td class="markdownTableBodyNone">34    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Only/2nd tri to occluded   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">49    </td></tr>
+<td class="markdownTableBodyNone">Only/2nd tri to occluded   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">37    </td></tr>
 <tr class="markdownTableRowEven">
-<td class="markdownTableBodyNone">1st tri to occluded   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">50    </td></tr>
+<td class="markdownTableBodyNone">1st tri to occluded   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">38    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Only/2nd tri to draw   </td><td class="markdownTableBodyNone">172   </td><td class="markdownTableBodyNone">159   </td><td class="markdownTableBodyNone">162    </td></tr>
+<td class="markdownTableBodyNone">Only/2nd tri to draw   </td><td class="markdownTableBodyNone">172   </td><td class="markdownTableBodyNone">149   </td><td class="markdownTableBodyNone">151    </td></tr>
 <tr class="markdownTableRowEven">
-<td class="markdownTableBodyNone">1st tri to draw   </td><td class="markdownTableBodyNone">173   </td><td class="markdownTableBodyNone">160   </td><td class="markdownTableBodyNone">163    </td></tr>
+<td class="markdownTableBodyNone">1st tri to draw   </td><td class="markdownTableBodyNone">173   </td><td class="markdownTableBodyNone">150   </td><td class="markdownTableBodyNone">152    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">Extra per tri from snake   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">10   </td><td class="markdownTableBodyNone">10    </td></tr>
+<td class="markdownTableBodyNone"><a class="el" href="structTri.html">Tri</a> snake   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">10/11*   </td><td class="markdownTableBodyNone">10/11*    </td></tr>
 <tr class="markdownTableRowEven">
 <td class="markdownTableBodyNone"><a class="el" href="unionVtx.html">Vtx</a> before DMA start   </td><td class="markdownTableBodyNone">16   </td><td class="markdownTableBodyNone">17   </td><td class="markdownTableBodyNone">17    </td></tr>
 <tr class="markdownTableRowOdd">
@@ -203,7 +203,7 @@ Cycle Counts</h2>
 <tr class="markdownTableRowEven">
 <td class="markdownTableBodyNone">Specular or fresnel   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">47   </td><td class="markdownTableBodyNone">47    </td></tr>
 <tr class="markdownTableRowOdd">
-<td class="markdownTableBodyNone">+ Fresnel   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">27   </td><td class="markdownTableBodyNone">27    </td></tr>
+<td class="markdownTableBodyNone">+ Fresnel   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">23   </td><td class="markdownTableBodyNone">23    </td></tr>
 <tr class="markdownTableRowEven">
 <td class="markdownTableBodyNone">+ Specular per dir lt   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">13   </td><td class="markdownTableBodyNone">13    </td></tr>
 <tr class="markdownTableRowOdd">
@@ -229,6 +229,12 @@ Cycle Counts</h2>
 <tr class="markdownTableRowOdd">
 <td class="markdownTableBodyNone">Light dir xfrm, 9 dir lts   </td><td class="markdownTableBodyNone">Can't   </td><td class="markdownTableBodyNone">196   </td><td class="markdownTableBodyNone">196   </td></tr>
 </table>
+<h2><a class="anchor" id="autotoc_md40"></a>
+Triangle Snake Cycle Counts</h2>
+<p>With the recent F3DEX3 updates bringing significant RSP time savings in command dispatch and triangle draw, triangle snakes are unfortuantely no longer competitive in RSP time.</p>
+<p>Suppose we have two tris which are offscreen. If drawn with <code>SP2Triangles</code>, this is 10 cycles for command dispatch, 21 cycles to cull the first tri, and 20 cycles to cull the second, for a total of 51 cycles. If drawn as part of a long triangle snake, the triangle snake processing adds 10 or 11 cycles relative to the <code>SP2Triangles</code> first or second triangle respectively. So this is 31 cycles to cull each triangle, for a total of 61 cycles.</p>
+<p>It gets worse for snakes when counting the overhead of starting and ending a snake, which have also gotten worse with the recent changes bringing triangle performance improvements. I used to have a long discussion here computing estimated performance for switching to snakes, but the numbers have all changed and they were imprecise to begin with. The upshot is for a typical scene, switching everything from <code>SP2Triangles</code> to snakes might save about 70 us of RDRAM/RDP time but cost about 400 us of RSP time.</p>
+<p>However, note that in F3DEX2, <code>SP2Triangles</code> to two offscreen triangles is 12+28+27 = 67 cycles. F3DEX3 is so much faster than F3DEX2 that even the performance penalty of snakes doesn't outweigh this. </p>
 </div></div><!-- contents -->
 </div><!-- PageDoc -->
 </div><!-- doc-content -->
